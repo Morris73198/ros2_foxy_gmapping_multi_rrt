@@ -1,0 +1,27 @@
+/**:
+  ros__parameters:
+    eta: 1.0
+    Geta: 1.0
+    info_radius: 1.0
+    info_multiplier: 3.0
+    hysteresis_radius: 3.0
+    hysteresis_gain: 3.0
+    costmap_clearing_threshold: 50
+    delay_after_assignement: 0.7
+    bandwith_cluster: 0.3
+    frequency: 5.0
+    
+    map_frame: "map"
+    robot_frame: "base_link"
+    global_costmap_topic: "/move_base_node/global_costmap/costmap"
+    
+    robots:
+      robot1:
+        name: "tb3_0"
+        map_topic: "/tb3_0/map"
+      robot2:
+        name: "tb3_1"
+        map_topic: "/tb3_1/map"
+      robot3:
+        name: "tb3_2"
+        map_topic: "/tb3_2/map"
