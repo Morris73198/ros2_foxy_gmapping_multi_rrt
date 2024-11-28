@@ -28,6 +28,7 @@ setup(
             'global_rrt_detector = rrt_exploration_ros2.global_detector_node:main',
             'local_detector_node = rrt_exploration_ros2.local_detector_node:main',
             'filter_node = rrt_exploration_ros2.filter_node:main',
+            'assigner = rrt_exploration_ros2.assigner:main',
         ],
     },
 )
