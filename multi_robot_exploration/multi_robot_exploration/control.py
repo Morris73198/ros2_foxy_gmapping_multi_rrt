@@ -260,7 +260,7 @@ class RobotControl(Node):
         # Create visualization message
         viz_path = Path()
         viz_path.header.stamp = self.get_clock().now().to_msg()
-        viz_path.header.frame_id = 'map'
+        viz_path.header.frame_id = 'merge_map'
         
         for x, y in path:
             pose = PoseStamped()
