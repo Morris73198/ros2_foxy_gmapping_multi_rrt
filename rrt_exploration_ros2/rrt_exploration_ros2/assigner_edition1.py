@@ -274,10 +274,9 @@ class GreedyAssigner(Node):
     def assign_targets(self):
         """使用A*路徑規劃分配目標"""
         if not self.available_points or self.robot1_pose is None or \
-            self.robot2_pose is None or self.map_data is None:
+           self.robot2_pose is None or self.map_data is None:
             return
 
-        MIN_DISTANCE = 1.0
         robots = {
             'robot1': self.robot1_pose,
             'robot2': self.robot2_pose
@@ -297,16 +296,6 @@ class GreedyAssigner(Node):
             valid_targets = []
             for point in self.available_points:
                 if tuple(point) in assigned_points:
-                    continue
-                    
-                # 計算直線距離
-                direct_dist = np.sqrt(
-                    (point[0] - robot_pose.position.x)**2 + 
-                    (point[1] - robot_pose.position.y)**2
-                )
-                
-                # 過濾太近的點
-                if direct_dist < MIN_DISTANCE:
                     continue
 
                 target_map_pos = self.world_to_map(point[0], point[1])
