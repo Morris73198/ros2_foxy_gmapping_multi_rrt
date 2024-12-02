@@ -7,7 +7,6 @@ import numpy as np
 import heapq, math, time, threading
 import scipy.interpolate as si
 import datetime
-import cv2
 
 def heuristic(a, b):
     return np.sqrt((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2)
@@ -89,40 +88,44 @@ class RobotControl(Node):
     def __init__(self):
         super().__init__('robot_control')
         
+        # Speed settings
         self.speed = 0.18
-        self.safety_distance = 12
         
+        # Initialize robot states
         self.robot1_path = []
         self.robot2_path = []
         self.visited_points = []
         self.has_map = False
         
+        # Add path monitoring parameters
         self.replan_distance = 0.5
         self.active_goals = {'robot1': None, 'robot2': None}
         
+        # Publishers for robot paths
         self.publisher_robot1_path = self.create_publisher(Float32MultiArray, 'robot1/path', 10)
         self.publisher_robot2_path = self.create_publisher(Float32MultiArray, 'robot2/path', 10)
+        
+        # Publishers for visualization
         self.viz_publisher_robot1 = self.create_publisher(Path, 'robot1/viz_path', 10)
         self.viz_publisher_robot2 = self.create_publisher(Path, 'robot2/viz_path', 10)
         
+        # Setup subscribers
         self.setup_subscribers()
         
+        # Initialize robot positions
         self.robot1_x = 0.0
         self.robot1_y = 0.0
         self.robot2_x = 0.0
         self.robot2_y = 0.0
         
+        # Initialize robot status
         self.robot1_status = True
         self.robot2_status = True
         
+        # Create path checking timer
         self.check_path_timer = self.create_timer(0.5, self.check_path_validity)
         
         print("[INFO] Robot Control System Active")
-
-    def dilate_obstacles(self, grid):
-        kernel = np.ones((self.safety_distance, self.safety_distance), np.uint8)
-        dilated = cv2.dilate(grid.astype(np.uint8), kernel, iterations=1)
-        return dilated
 
     def setup_subscribers(self):
         self.subscription_map = self.create_subscription(
@@ -215,7 +218,7 @@ class RobotControl(Node):
         for x, y in points:
             if not (0 <= x < self.width and 0 <= y < self.height):
                 continue
-            if self.data[y][x] == 1:
+            if self.data[y][x] == 1:  # Obstacle
                 return True
         return False
     
@@ -259,10 +262,9 @@ class RobotControl(Node):
         self.originY = msg.info.origin.position.y
         self.width = msg.info.width
         self.height = msg.info.height
-        raw_data = np.array(msg.data).reshape(self.height, self.width)
-        self.data = np.where(raw_data > 50, 1, 0)
-        self.data = self.dilate_obstacles(self.data)
-        print("[INFO] Map received and processed with safety distance")
+        self.data = np.array(msg.data).reshape(self.height, self.width)
+        self.data = np.where(self.data > 50, 1, 0)
+        print("[INFO] Map received")
 
     def robot1_odom_callback(self, msg):
         self.robot1_x = msg.pose.pose.position.x

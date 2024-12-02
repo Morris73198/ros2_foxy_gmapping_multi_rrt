@@ -90,7 +90,7 @@ class RobotControl(Node):
         super().__init__('robot_control')
         
         self.speed = 0.18
-        self.safety_distance = 12
+        self.safety_distance = 10
         
         self.robot1_path = []
         self.robot2_path = []
