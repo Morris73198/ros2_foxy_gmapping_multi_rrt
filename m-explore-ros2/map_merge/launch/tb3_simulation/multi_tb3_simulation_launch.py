@@ -81,6 +81,8 @@ def generate_launch_description():
     declare_world_cmd = DeclareLaunchArgument(
         "world",
         default_value=os.path.join(launch_dir_map_merge, "worlds", "world_only.model"),
+        # default_value=os.path.join(launch_dir_map_merge, "worlds", "turtlebot3_house_mod.world"),
+
         description="Full path to world file to load",
     )
 

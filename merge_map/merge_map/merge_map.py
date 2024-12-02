@@ -16,7 +16,7 @@ class MergeMapNode(Node):
         # Declare parameters
         self.declare_parameter('map_size', 40.0)
         self.declare_parameter('origin_offset', -20.0)
-        self.declare_parameter('dilation_size', 3)
+        self.declare_parameter('dilation_size', 5)
         self.declare_parameter('robot_marker_size', 0.3)
         self.declare_parameter('marker_update_rate', 1.0)  # Hz
         self.declare_parameter('debug_mode', True)
