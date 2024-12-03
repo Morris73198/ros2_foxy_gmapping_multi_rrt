@@ -2,13 +2,14 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped, Point
+from geometry_msgs.msg import PoseStamped, Point, Twist
 from visualization_msgs.msg import MarkerArray, Marker
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Path
+from std_msgs.msg import String, ColorRGBA, Float32MultiArray
 import numpy as np
-from std_msgs.msg import String, ColorRGBA
 import heapq
 from typing import List, Tuple, Set
+import cv2
 
 class GreedyAssigner(Node):
     def __init__(self):
@@ -19,7 +20,7 @@ class GreedyAssigner(Node):
         self.robot2_pose = None
         self.available_points = []
         self.assigned_targets = {'robot1': None, 'robot2': None}
-        self.robot_paths = {'robot1': None, 'robot2': None}
+        self.robot_status = {'robot1': True, 'robot2': True}  # True means robot is available for new target
         
         # 地圖相關變量
         self.map_data = None
@@ -28,6 +29,9 @@ class GreedyAssigner(Node):
         self.map_height = None
         self.map_origin = None
         
+        # 目標到達閾值
+        self.target_threshold = 0.3  # 機器人距離目標點小於此值視為到達
+        
         # 訂閱和發布
         self.setup_subscribers()
         self.setup_publishers()
@@ -35,12 +39,12 @@ class GreedyAssigner(Node):
         # 創建定時器
         self.create_timer(1.0, self.assign_targets)
         self.create_timer(0.1, self.publish_visualization)
+        self.create_timer(0.1, self.check_target_reached)
         
         self.get_logger().info('Greedy assigner node with A* pathfinding started')
 
     def setup_subscribers(self):
         """設置所有訂閱者"""
-        # 地圖訂閱
         self.map_sub = self.create_subscription(
             OccupancyGrid,
             '/merge_map',
@@ -48,7 +52,6 @@ class GreedyAssigner(Node):
             10
         )
         
-        # 機器人位置訂閱
         self.robot1_pose_sub = self.create_subscription(
             PoseStamped,
             '/robot1_pose',
@@ -63,7 +66,6 @@ class GreedyAssigner(Node):
             10
         )
         
-        # 目標點訂閱
         self.filtered_points_sub = self.create_subscription(
             MarkerArray,
             '/filtered_points',
@@ -127,6 +129,36 @@ class GreedyAssigner(Node):
                 self.available_points.extend([(p.x, p.y) for p in marker.points])
         self.get_logger().debug(f'Received {len(self.available_points)} filtered points')
 
+    def check_target_reached(self):
+        """檢查機器人是否到達目標點"""
+        robots = {
+            'robot1': (self.robot1_pose, self.robot1_pose_callback),
+            'robot2': (self.robot2_pose, self.robot2_pose_callback)
+        }
+
+        for robot_name, (robot_pose, _) in robots.items():
+            if not robot_pose or not self.assigned_targets[robot_name]:
+                continue
+
+            target = self.assigned_targets[robot_name]
+            current_pos = (robot_pose.position.x, robot_pose.position.y)
+            target_pos = target
+
+            # 計算當前位置與目標點的距離
+            distance = np.sqrt(
+                (current_pos[0] - target_pos[0])**2 + 
+                (current_pos[1] - target_pos[1])**2
+            )
+
+            # 如果距離小於閾值，認為已到達目標
+            if distance < self.target_threshold:
+                if not self.robot_status[robot_name]:
+                    self.get_logger().info(f'{robot_name} has reached target {target_pos}')
+                self.robot_status[robot_name] = True
+                self.assigned_targets[robot_name] = None
+            else:
+                self.robot_status[robot_name] = False
+
     def world_to_map(self, wx: float, wy: float) -> Tuple[int, int]:
         """將世界坐標轉換為地圖坐標"""
         mx = int((wx - self.map_origin.position.x) / self.map_resolution)
@@ -165,10 +197,10 @@ class GreedyAssigner(Node):
         """計算啟發式值（使用歐幾里得距離）"""
         return np.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
 
-    def a_star(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """A*路徑規劃"""
+    def a_star(self, start: Tuple[int, int], goal: Tuple[int, int]) -> bool:
+        """使用A*檢查目標點是否可達"""
         if not self.is_valid_point(*start) or not self.is_valid_point(*goal):
-            return None
+            return False
 
         frontier = []
         heapq.heappush(frontier, (0, start))
@@ -179,12 +211,7 @@ class GreedyAssigner(Node):
             current = heapq.heappop(frontier)[1]
 
             if current == goal:
-                path = []
-                while current is not None:
-                    path.append(current)
-                    current = came_from[current]
-                path.reverse()
-                return path
+                return True
 
             for next_pos in self.get_neighbors(current):
                 movement_cost = 1.414 if abs(next_pos[0] - current[0]) + abs(next_pos[1] - current[1]) == 2 else 1
@@ -196,7 +223,7 @@ class GreedyAssigner(Node):
                     heapq.heappush(frontier, (priority, next_pos))
                     came_from[next_pos] = current
 
-        return None
+        return False
 
     def create_target_marker(self, point: Tuple[float, float], robot_name: str, marker_id: int) -> Marker:
         """創建目標點標記"""
@@ -224,28 +251,8 @@ class GreedyAssigner(Node):
             
         return marker
 
-    def create_path_marker(self, path_points: List[Tuple[float, float]], robot_name: str, marker_id: int) -> Marker:
-        """創建路徑標記"""
-        marker = Marker()
-        marker.header.frame_id = "merge_map"
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = f"{robot_name}_path"
-        marker.id = marker_id
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
-
-        marker.points = [Point(x=x, y=y, z=0.0) for x, y in path_points]
-        marker.scale.x = 0.1
-        
-        if robot_name == 'robot1':
-            marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.5)
-        else:
-            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.5)
-            
-        return marker
-
     def publish_visualization(self):
-        """發布目標點和路徑的可視化"""
+        """發布目標點的可視化"""
         if not all(self.assigned_targets.values()) or \
            self.robot1_pose is None or self.robot2_pose is None:
             return
@@ -253,17 +260,10 @@ class GreedyAssigner(Node):
         marker_array = MarkerArray()
         
         for robot_name in ['robot1', 'robot2']:
-            if self.assigned_targets[robot_name] and self.robot_paths[robot_name]:
+            if self.assigned_targets[robot_name]:
                 marker_array.markers.append(
                     self.create_target_marker(
                         self.assigned_targets[robot_name],
-                        robot_name,
-                        len(marker_array.markers)
-                    )
-                )
-                marker_array.markers.append(
-                    self.create_path_marker(
-                        self.robot_paths[robot_name],
                         robot_name,
                         len(marker_array.markers)
                     )
@@ -272,7 +272,7 @@ class GreedyAssigner(Node):
         self.target_viz_pub.publish(marker_array)
 
     def assign_targets(self):
-        """使用A*路徑規劃分配目標"""
+        """分配目標給機器人"""
         if not self.available_points or self.robot1_pose is None or \
             self.robot2_pose is None or self.map_data is None:
             return
@@ -284,8 +284,15 @@ class GreedyAssigner(Node):
         }
 
         assigned_points = set()
+        for robot, target in self.assigned_targets.items():
+            if target is not None:
+                assigned_points.add(tuple(target))
 
         for robot_name, robot_pose in robots.items():
+            # 只在機器人可用且沒有當前目標時分配新目標
+            if not self.robot_status[robot_name] or self.assigned_targets[robot_name] is not None:
+                continue
+
             if not set(self.available_points) - assigned_points:
                 break
 
@@ -299,30 +306,23 @@ class GreedyAssigner(Node):
                 if tuple(point) in assigned_points:
                     continue
                     
-                # 計算直線距離
                 direct_dist = np.sqrt(
                     (point[0] - robot_pose.position.x)**2 + 
                     (point[1] - robot_pose.position.y)**2
                 )
                 
-                # 過濾太近的點
                 if direct_dist < MIN_DISTANCE:
                     continue
 
                 target_map_pos = self.world_to_map(point[0], point[1])
-                path = self.a_star(robot_map_pos, target_map_pos)
                 
-                if path:
-                    path_world = [self.map_to_world(x, y) for x, y in path]
-                    path_length = sum(np.sqrt((p2[0]-p1[0])**2 + (p2[1]-p1[1])**2) 
-                                    for p1, p2 in zip(path_world[:-1], path_world[1:]))
-                    valid_targets.append((point, path_length, path_world))
+                if self.a_star(robot_map_pos, target_map_pos):
+                    valid_targets.append((point, direct_dist))
 
             if valid_targets:
-                closest_point, path_length, path = min(valid_targets, key=lambda x: x[1])
+                closest_point = min(valid_targets, key=lambda x: x[1])[0]
                 assigned_points.add(tuple(closest_point))
                 self.assigned_targets[robot_name] = closest_point
-                self.robot_paths[robot_name] = path
 
                 target_pose = PoseStamped()
                 target_pose.header.frame_id = 'merge_map'
@@ -337,7 +337,7 @@ class GreedyAssigner(Node):
                     self.robot2_target_pub.publish(target_pose)
 
                 debug_msg = String()
-                debug_msg.data = f'Assigned target {closest_point} to {robot_name} with path length {path_length:.2f}m'
+                debug_msg.data = f'Assigned target {closest_point} to {robot_name}'
                 self.debug_pub.publish(debug_msg)
                 self.get_logger().info(debug_msg.data)
             else:
