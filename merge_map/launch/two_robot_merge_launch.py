@@ -77,7 +77,7 @@ def generate_launch_description():
     # Add actions
     ld.add_action(multi_tb3_launch)
     ld.add_action(delayed_robot_pose)
-    ld.add_action(delayed_map_merge)
+    #ld.add_action(delayed_map_merge)
     ld.add_action(rviz_node)
 
     return ld

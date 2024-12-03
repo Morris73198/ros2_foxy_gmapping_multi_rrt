@@ -7,8 +7,8 @@ map_merge:
     robot_map_topic: map
     robot_map_updates_topic: map_updates
     robot_namespace: ""
-    merged_map_topic: map
-    world_frame: world
+    merged_map_topic: merge_map
+    world_frame: merge_map
     known_init_poses: true
     # known_init_poses: false
 
