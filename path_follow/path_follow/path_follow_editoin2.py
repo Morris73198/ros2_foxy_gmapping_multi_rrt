@@ -29,17 +29,17 @@ class PathFollower(Node):
             self.odom_callback,
             10)
             
-       
-        self.Kp = 0.4  
-        self.Ki = 0.0005  
-        self.Kd = 0.4  
+        # Improved PID Parameters
+        self.Kp = 0.4  # Reduced from 0.6
+        self.Ki = 0.0005  # Reduced from 0.001
+        self.Kd = 0.4  # Increased derivative term
         self.integral = 0.0
         self.prev_error = 0.0
-        self.max_integral = 0.3  
+        self.max_integral = 0.3  # Reduced integral limit
         self.dt = 0.1
         
         # Improved Motion Parameters
-        self.lookahead_distance = 0.2  # Increased lookahead
+        self.lookahead_distance = 0.15  # Increased lookahead
         self.speed = 0.15
         self.goal_tolerance = 0.15
         self.max_angular_velocity = 0.6  # Reduced max angular velocity

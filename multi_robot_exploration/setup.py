@@ -20,7 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'control = multi_robot_exploration.control:main'
+            'path_planner = multi_robot_exploration.path_planner:main'
         ],
     },
 )

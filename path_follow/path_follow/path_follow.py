@@ -1,12 +1,32 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
-from nav_msgs.msg import Path
-from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Path, Odometry
+from geometry_msgs.msg import PoseStamped, Twist, Point
+from sensor_msgs.msg import LaserScan
+from visualization_msgs.msg import Marker, MarkerArray
+from rclpy.qos import qos_profile_sensor_data
 import threading
-import math
-import time
+import math, time
+import numpy as np
+import tf_transformations
+
+class PID:
+    def __init__(self,kp,ki,kd,target):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.target = target
+        self.integral = 0
+        self.diff = 0
+        self.preerror = 0
+        
+    def PIDoutput(self,position):
+        error = position - self.target
+        self.integral = self.integral + error
+        self.diff = error - self.preerror
+        self.output = self.kp * error + self.ki * self.integral + self.kd * self.diff
+        self.preerror = error
 
 class PathFollower(Node):
     def __init__(self):
@@ -15,6 +35,9 @@ class PathFollower(Node):
         # Publishers
         self.publisher_visual_path = self.create_publisher(Path, 'visual_path', 10)
         self.publisher_cmd_vel = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.publisher_markers = self.create_publisher(MarkerArray, 'segment_markers', 10)
+        self.publisher_current_goal = self.create_publisher(Marker, 'current_goal_marker', 10)
+        self.publisher_apf_forces = self.create_publisher(Marker, 'apf_forces', 10)
         
         # Subscribers
         self.subscription_path = self.create_subscription(
@@ -29,231 +52,373 @@ class PathFollower(Node):
             self.odom_callback,
             10)
             
-        # Improved PID Parameters
-        self.Kp = 0.4  # Reduced from 0.6
-        self.Ki = 0.0005  # Reduced from 0.001
-        self.Kd = 0.4  # Increased derivative term
-        self.integral = 0.0
-        self.prev_error = 0.0
-        self.max_integral = 0.3  # Reduced integral limit
-        self.dt = 0.1
+        self.subscription_scan = self.create_subscription(
+            LaserScan,
+            'scan',
+            self.scan_callback,
+            qos_profile_sensor_data)
+            
+        # APF parameters
+        self.Eta_att = 110  
+        self.Eta_rep_ob = 3  
+        self.n = 3  
+        self.obstacle_distance_threshold = 0.5
+        self.front_angle_range = 2 * math.pi
+        self.segment_distance = 0.5
         
-        # Improved Motion Parameters
-        self.lookahead_distance = 0.2  # Increased lookahead
-        self.speed = 0.15
-        self.goal_tolerance = 0.15
-        self.max_angular_velocity = 0.6  # Reduced max angular velocity
-        self.min_speed = 0.05
+        # Speed limits
+        self.speedTH = 0.15
+        self.thetaTH = 0.65
         
-        # Turn Control Parameters
-        self.angular_velocity_filter = 0.8  # Smoothing factor
-        self.turn_detection_threshold = math.pi/3
-        self.turn_deceleration_factor = 0.6
-        self.min_turn_radius = 0.3
-        
-        # State Variables
-        self.x = None
-        self.y = None
-        self.yaw = None
+        # Initialize states
+        self.position = [0, 0, 0]
+        self.euler = [0, 0, 0]
         self.path = None
+        self.current_goal = None
+        self.current_goal_index = 0
         self.following_path = False
-        self.prev_angular_velocity = 0.0
-        self.current_path_index = 0
         
-        self.get_logger().info("Enhanced PID Path follower node started")
+        # Path following thread control
+        self.follow_thread = None
+        self.path_follow_lock = threading.Lock()
+        
+        # Initialize LiDAR
+        self.angle_min = 0
+        self.angle_max = 0
+        self.angle_increment = 0
+        self.ranges = []
+        
+        self.front_min_angle = 2*math.pi - self.front_angle_range/2
+        self.front_max_angle = self.front_angle_range/2
+        
+        self.get_logger().info("Path follower node has been started")
 
-    def euler_from_quaternion(self, x, y, z, w):
-        t3 = +2.0 * (w * z + x * y)
-        t4 = +1.0 - 2.0 * (y * y + z * z)
-        return math.atan2(t3, t4)
+    def stop_robot(self):
+        twist = Twist()
+        twist.linear.x = 0.0
+        twist.angular.z = 0.0
+        self.publisher_cmd_vel.publish(twist)
 
-    def calculate_pid(self, error):
-        # Anti-windup integral with improved limits
-        self.integral = max(min(self.integral + error * self.dt, self.max_integral), -self.max_integral)
+    def create_current_goal_marker(self):
+        """Create marker for current goal point"""
+        marker = Marker()
+        marker.header.frame_id = "merge_map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "current_goal"
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
         
-        # Calculate PID terms
-        p_term = self.Kp * error
-        i_term = self.Ki * self.integral
-        d_term = self.Kd * (error - self.prev_error) / self.dt
+        marker.pose.position.x = self.current_goal[0]
+        marker.pose.position.y = self.current_goal[1]
+        marker.pose.position.z = 0.2
         
-        # Enhanced derivative filtering
-        d_term = 0.8 * d_term + 0.2 * (self.prev_error / self.dt)
-        self.prev_error = error
+        marker.pose.orientation.w = 1.0
         
-        # Calculate total control output
-        output = p_term + i_term + d_term
+        marker.scale.x = 0.4
+        marker.scale.y = 0.4
+        marker.scale.z = 0.4
         
-        # Apply smoothing filter
-        output = self.angular_velocity_filter * output + (1 - self.angular_velocity_filter) * self.prev_angular_velocity
-        self.prev_angular_velocity = output
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
         
-        return output
+        return marker
 
-    def detect_sharp_turn(self, current_x, current_y, path, index):
-        if index + 2 >= len(path):
-            return False, 0.0
+    def create_force_vector_marker(self, fx, fy):
+        """Create marker for APF force vector"""
+        marker = Marker()
+        marker.header.frame_id = "merge_map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "force_vector"
+        marker.id = 0
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+        
+        # Start point at robot position
+        marker.points.append(Point(x=self.position[0], y=self.position[1], z=0.1))
+        
+        # End point shows force direction
+        scale = 0.5  # Scale factor for vector visualization
+        marker.points.append(Point(
+            x=self.position[0] + fx * scale,
+            y=self.position[1] + fy * scale,
+            z=0.1
+        ))
+        
+        # Arrow properties
+        marker.scale.x = 0.1  # shaft diameter
+        marker.scale.y = 0.2  # head diameter
+        marker.scale.z = 0.2  # head length
+        
+        # Green color for force vector
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+        
+        return marker
+
+    def segment_path(self, path):
+        """Split path into fixed distance segments"""
+        segment_points = []  # Always include start point
+        
+        for i in range(1, len(path)):
+            if not segment_points:  # 如果 segment_points 是空的
+                prev_point = path[0]
+            else:
+                prev_point = segment_points[-1]
+            current_point = path[i]
             
-        # Calculate angles between consecutive path segments
-        v1 = (path[index+1][0] - path[index][0], path[index+1][1] - path[index][1])
-        v2 = (path[index+2][0] - path[index+1][0], path[index+2][1] - path[index+1][1])
-        
-        dot_product = v1[0]*v2[0] + v1[1]*v2[1]
-        v1_mag = math.sqrt(v1[0]**2 + v1[1]**2)
-        v2_mag = math.sqrt(v2[0]**2 + v2[1]**2)
-        
-        if v1_mag * v2_mag == 0:
-            return False, 0.0
+            distance = math.hypot(
+                current_point[0] - prev_point[0],
+                current_point[1] - prev_point[1]
+            )
             
-        cos_angle = dot_product / (v1_mag * v2_mag)
-        cos_angle = max(min(cos_angle, 1.0), -1.0)
-        angle = math.acos(cos_angle)
-        
-        return angle > self.turn_detection_threshold, angle
-
-    def pure_pursuit(self, current_x, current_y, current_heading, path, index):
-        closest_point = None
-        v = self.speed
-        
-        # Enhanced turn detection
-        is_sharp_turn, turn_angle = self.detect_sharp_turn(current_x, current_y, path, index)
-        
-        # Look ahead point selection with dynamic distance
-        current_lookahead = self.lookahead_distance
-        if is_sharp_turn:
-            current_lookahead *= (1.0 + turn_angle / math.pi)
-            v *= self.turn_deceleration_factor
-        
-        # Find target point with improved lookahead
-        for i in range(index, len(path)):
-            x = path[i][0]
-            y = path[i][1]
-            distance = math.hypot(current_x - x, current_y - y)
-            
-            if current_lookahead < distance:
-                # Calculate perpendicular distance to path
-                if i > 0:
-                    path_vector = (path[i][0] - path[i-1][0], path[i][1] - path[i-1][1])
-                    to_robot = (current_x - path[i-1][0], current_y - path[i-1][1])
-                    path_len = math.sqrt(path_vector[0]**2 + path_vector[1]**2)
-                    if path_len > 0:
-                        # Normalize path vector
-                        path_vector = (path_vector[0]/path_len, path_vector[1]/path_len)
-                        # Calculate cross track error
-                        cross_track = abs(to_robot[0]*path_vector[1] - to_robot[1]*path_vector[0])
-                        # Adjust speed based on cross track error
-                        v *= max(0.3, 1.0 - cross_track/self.min_turn_radius)
+            if distance >= self.segment_distance:
+                num_segments = int(distance / self.segment_distance)
+                for j in range(1, num_segments + 1):
+                    ratio = j * self.segment_distance / distance
+                    new_x = prev_point[0] + (current_point[0] - prev_point[0]) * ratio
+                    new_y = prev_point[1] + (current_point[1] - prev_point[1]) * ratio
+                    segment_points.append((new_x, new_y))
                 
-                closest_point = (x, y)
-                index = i
-                break
+        segment_points.append(path[-1])  # Always include end point
+        return segment_points
+
+    def create_segment_markers(self, path):
+        """Create hollow circle markers for segment points"""
+        marker_array = MarkerArray()
+        segment_points = self.segment_path(path)
         
-        if closest_point is None:
-            closest_point = path[-1]
-            index = len(path)-1
-        
-        # Calculate steering control with improved angle handling
-        target_heading = math.atan2(closest_point[1] - current_y,
-                                  closest_point[0] - current_x)
-        error = target_heading - current_heading
-        while error > math.pi: error -= 2 * math.pi
-        while error < -math.pi: error += 2 * math.pi
-        
-        # Enhanced speed control for turns
-        turn_factor = abs(error) / math.pi
-        v *= max(0.3, 1.0 - turn_factor)
-        
-        # Calculate angular velocity with improved PID
-        angular_velocity = self.calculate_pid(error)
-        
-        # Dynamic angular velocity limits
-        current_max_angular_velocity = self.max_angular_velocity
-        if is_sharp_turn:
-            current_max_angular_velocity *= 0.7
-        
-        # Apply limits
-        angular_velocity = max(min(angular_velocity, current_max_angular_velocity),
-                             -current_max_angular_velocity)
-        
-        return v, angular_velocity, index
+        for i, point in enumerate(segment_points):
+            marker = Marker()
+            marker.header.frame_id = "merge_map"
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = "segment_markers"
+            marker.id = i
+            marker.type = Marker.CYLINDER
+            marker.action = Marker.ADD
+            
+            marker.pose.position.x = point[0]
+            marker.pose.position.y = point[1]
+            marker.pose.position.z = 0.05
+            
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.3
+            marker.scale.y = 0.3
+            marker.scale.z = 0.01
+            
+            marker.color.r = 0.0
+            marker.color.g = 0.0
+            marker.color.b = 1.0
+            marker.color.a = 0.8
+            
+            marker_array.markers.append(marker)
+            
+        return marker_array
 
     def path_callback(self, msg):
         self.get_logger().info("New path received")
-        data_list = list(msg.data)
-        self.path = [(data_list[i], data_list[i+1]) 
-                    for i in range(0, len(data_list), 2)]
         
-        if not self.following_path:
-            self.integral = 0.0
-            self.prev_error = 0.0
-            self.prev_angular_velocity = 0.0
-            self.current_path_index = 0
-            threading.Thread(target=self.follow_path).start()
-
-    def follow_path(self):
-        self.following_path = True
-        
-        twist = Twist()
-        path_msg = Path()
-        path_msg.header.frame_id = "map"
-        
-        while self.x is None:
-            time.sleep(0.1)
+        with self.path_follow_lock:
+            if self.following_path:
+                self.following_path = False
+                if self.follow_thread:
+                    self.follow_thread.join()
+                self.stop_robot()
             
-        for x, y in self.path:
-            pose = PoseStamped()
-            pose.header = path_msg.header
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            path_msg.poses.append(pose)
-        
-        while self.following_path:
-            path_msg.header.stamp = self.get_clock().now().to_msg()
+            data_list = list(msg.data)
+            self.path = [(data_list[i], data_list[i+1]) 
+                        for i in range(0, len(data_list), 2)]
             
-            # Get control commands
-            v, w, self.current_path_index = self.pure_pursuit(
-                self.x, self.y, self.yaw,
-                self.path, self.current_path_index
-            )
             
-            # Goal check with improved tolerance
-            distance_to_goal = math.hypot(
-                self.x - self.path[-1][0],
-                self.y - self.path[-1][1]
-            )
+            # Create segment markers
+            if len(self.path) > 0:
+                marker_array = self.create_segment_markers(self.path)
+                self.publisher_markers.publish(marker_array)
+                
+                
+            self.path = self.segment_path(self.path)    
+            self.current_goal_index = 0
+            self.current_goal = self.path[0]
             
-            if distance_to_goal < self.goal_tolerance:
-                twist.linear.x = 0.0
-                twist.angular.z = 0.0
-                self.publisher_cmd_vel.publish(twist)
-                self.get_logger().info("Goal reached")
-                break
             
-            # Publish commands
-            twist.linear.x = max(self.min_speed, v)
-            twist.angular.z = w
-            self.publisher_visual_path.publish(path_msg)
-            self.publisher_cmd_vel.publish(twist)
             
-            time.sleep(self.dt)
             
-        self.following_path = False
+            self.following_path = True
+            self.follow_thread = threading.Thread(target=self.follow_path)
+            self.follow_thread.start()
 
     def odom_callback(self, msg):
-        self.x = msg.pose.pose.position.x
-        self.y = msg.pose.pose.position.y
-        self.yaw = self.euler_from_quaternion(
+        self.position[0] = msg.pose.pose.position.x
+        self.position[1] = msg.pose.pose.position.y
+        self.position[2] = msg.pose.pose.position.z
+        
+        self.euler = tf_transformations.euler_from_quaternion([
             msg.pose.pose.orientation.x,
             msg.pose.pose.orientation.y,
             msg.pose.pose.orientation.z,
             msg.pose.pose.orientation.w
-        )
+        ])
+
+    def scan_callback(self, msg):
+        self.angle_min = msg.angle_min
+        self.angle_max = msg.angle_max
+        self.angle_increment = msg.angle_increment
+        self.ranges = msg.ranges
+
+    def calculate_apf_forces(self):
+        if not self.current_goal:
+            return 0, 0
+            
+        # Attractive force toward goal
+        Ptogoal = [
+            self.current_goal[0] - self.position[0],
+            self.current_goal[1] - self.position[1]
+        ]
+        distance_to_goal = np.linalg.norm(Ptogoal)
+        F_att = [
+            self.Eta_att * distance_to_goal * Ptogoal[0]/distance_to_goal,
+            self.Eta_att * distance_to_goal * Ptogoal[1]/distance_to_goal
+        ]
+        
+        # Repulsive force from obstacles
+        F_rep = [0, 0]
+        if len(self.ranges) > 0:
+            angles = self.angle_min + np.arange(len(self.ranges)) * self.angle_increment
+            front_indices = np.where(
+                (angles > self.front_min_angle) | 
+                (angles < self.front_max_angle)
+            )[0]
+            
+            for idx in front_indices:
+                if self.ranges[idx] < self.obstacle_distance_threshold:
+                    obs_angle = angles[idx] + self.euler[2]
+                    
+                    F_rep_ob1_abs = (
+                        self.Eta_rep_ob * 
+                        (1/self.ranges[idx] - 1/self.obstacle_distance_threshold) * 
+                        distance_to_goal**self.n / 
+                        self.ranges[idx]**2
+                    )
+                    
+                    F_rep[0] += F_rep_ob1_abs * (-math.cos(obs_angle))
+                    F_rep[1] += F_rep_ob1_abs * (-math.sin(obs_angle))
+        
+        # Sum forces and normalize
+        F_sum = [F_att[0] + F_rep[0], F_att[1] + F_rep[1]]
+        F_magnitude = np.linalg.norm(F_sum)
+        
+        if F_magnitude > 0:
+            UniVec_Fsum = [f / F_magnitude for f in F_sum]
+            return UniVec_Fsum[0], UniVec_Fsum[1]
+            
+        return 0, 0
+
+    def follow_path(self):
+        """Main path following logic"""
+        twist = Twist()
+        path_msg = Path()
+        path_msg.header.frame_id = "merge_map"
+        
+        # Initialize PID controllers
+        z = PID(0.4, 0.01, 0.1, 0)  # Angular PID
+        x = PID(1, 0.01, 0.05, 0)   # Linear PID
+        
+        while self.position[0] == 0 and self.position[1] == 0:
+            time.sleep(0.1)
+            
+        # Create visualization path message
+        for px, py in self.path:
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = px
+            pose.pose.position.y = py
+            path_msg.poses.append(pose)
+            
+        while self.following_path and self.current_goal_index < len(self.path):
+            path_msg.header.stamp = self.get_clock().now().to_msg()
+            
+            # Calculate and visualize APF forces
+            fx, fy = self.calculate_apf_forces()
+            force_marker = self.create_force_vector_marker(fx, fy)
+            self.publisher_apf_forces.publish(force_marker)
+            
+            # Update and publish current goal marker
+            current_goal_marker = self.create_current_goal_marker()
+            self.publisher_current_goal.publish(current_goal_marker)
+            
+            theta = math.atan2(fy, fx)
+            rotate = self.euler[2] - theta
+
+            distance_to_goal = math.hypot(
+                self.position[0] - self.current_goal[0],
+                self.position[1] - self.current_goal[1]
+            )
+            
+            min_obstacle_distance = self.obstacle_distance_threshold
+            if len(self.ranges) > 0:
+                min_obstacle_distance = min(self.obstacle_distance_threshold, min(self.ranges))
+            
+            # Calculate linear velocity based on angular error
+            twist.linear.x = abs(self.speedTH * (1 - abs(rotate)/math.pi))
+            
+            # Calculate angular velocity using PID
+            if rotate > 0:
+                if rotate <= math.pi:
+                    z.PIDoutput(rotate)
+                    twist.angular.z = max(-self.thetaTH, -z.output)
+                else:
+                    z.PIDoutput(2*math.pi - rotate)
+                    twist.angular.z = min(self.thetaTH, z.output)
+            else:
+                if abs(rotate) <= math.pi:
+                    z.PIDoutput(rotate)
+                    twist.angular.z = min(self.thetaTH, -z.output)
+                else:
+                    z.PIDoutput(-2*math.pi - rotate)
+                    twist.angular.z = max(-self.thetaTH, z.output)
+            
+            # Check if reached current goal point
+            if distance_to_goal < 0.3:
+                self.current_goal_index += 1
+                if self.current_goal_index < len(self.path):
+                    self.current_goal = self.path[self.current_goal_index]
+                    self.get_logger().info(f"Reached waypoint {self.current_goal_index}")
+                    x.integral = 0
+                    z.integral = 0
+                else:
+                    twist.linear.x = 0.0
+                    twist.angular.z = 0.0
+                    self.publisher_cmd_vel.publish(twist)
+                    self.get_logger().info("Goal reached")
+                    break
+            
+            # Publish commands if still following path
+            if self.following_path:
+                self.publisher_visual_path.publish(path_msg)
+                self.publisher_cmd_vel.publish(twist)
+            else:
+                self.stop_robot()
+                break
+            
+            time.sleep(0.1)
+        
+        self.following_path = False
+        self.stop_robot()
 
 def main(args=None):
     rclpy.init(args=args)
     node = PathFollower()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
