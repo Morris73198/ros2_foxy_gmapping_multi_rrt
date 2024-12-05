@@ -49,7 +49,7 @@ def generate_launch_description():
     # Names and poses of the robots for known poses demo
     robots_known_poses = [
         {"name": "robot1", "x_pose": 0.9, "y_pose": 3.3, "z_pose": 0.01},
-        {"name": "robot2", "x_pose": -4.0, "y_pose": 1.5, "z_pose": 0.01},
+        {"name": "robot2", "x_pose": 1.0, "y_pose": 1.5, "z_pose": 0.01},
     ]
     # Names and poses of the robots for unknown poses demo, the must be very close at beginning
     robots_unknown_poses = [

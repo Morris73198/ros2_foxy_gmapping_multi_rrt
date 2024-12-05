@@ -46,11 +46,11 @@ class RobotPoseNode(Node):
             for transform in msg.transforms:
                 if transform.header.frame_id == 'odom' and transform.child_frame_id == 'base_footprint':
                     self.tf_data[robot_name] = transform
-                    self.get_logger().info(
-                        f'Updated {robot_name} pose: '
-                        f'x={transform.transform.translation.x:.2f}, '
-                        f'y={transform.transform.translation.y:.2f}'
-                    )
+                    # self.get_logger().info(
+                    #     f'Updated {robot_name} pose: '
+                    #     f'x={transform.transform.translation.x:.2f}, '
+                    #     f'y={transform.transform.translation.y:.2f}'
+                    # )
 
     def publish_poses(self):
         """
@@ -73,11 +73,11 @@ class RobotPoseNode(Node):
                     
                     # 发布位置
                     self.pose_publishers[robot_name].publish(pose_msg)
-                    self.get_logger().info(
-                        f'Published {robot_name} pose: '
-                        f'x={pose_msg.pose.position.x:.2f}, '
-                        f'y={pose_msg.pose.position.y:.2f}'
-                    )
+                    # self.get_logger().info(
+                    #     f'Published {robot_name} pose: '
+                    #     f'x={pose_msg.pose.position.x:.2f}, '
+                    #     f'y={pose_msg.pose.position.y:.2f}'
+                    # )
 
 def main(args=None):
     rclpy.init(args=args)
