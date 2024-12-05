@@ -324,7 +324,7 @@ class PathFollower(Node):
         path_msg.header.frame_id = "merge_map"
         
         # Initialize PID controllers
-        z = PID(0.4, 0.01, 0.1, 0)  # Angular PID
+        z = PID(0.4, 0.0, 0.0, 0)  # Angular PID
         x = PID(1, 0.01, 0.05, 0)   # Linear PID
         
         while self.position[0] == 0 and self.position[1] == 0:

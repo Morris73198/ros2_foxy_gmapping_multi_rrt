@@ -134,7 +134,7 @@ class DualRobotPathPlanner(Node):
     def is_point_safe(self, pos):
         """檢查一個點是否滿足安全距離要求"""
         row, col = pos
-        safety_distance = int(0.3 / self.resolution)  # 0.3米的安全距離
+        safety_distance = int(0.2 / self.resolution)  # 0.3米的安全距離
         
         # 檢查安全距離內是否有障礙物
         for dr in range(-safety_distance, safety_distance + 1):
@@ -150,7 +150,7 @@ class DualRobotPathPlanner(Node):
                 if self.map_data[check_row][check_col] == 1:
                     # 計算到障礙物的實際距離
                     distance = math.sqrt(dr**2 + dc**2) * self.resolution
-                    if distance < 0.35:  # 安全距離為0.3米
+                    if distance < 0.2:  # 安全距離為0.3米
                         return False
         return True
 

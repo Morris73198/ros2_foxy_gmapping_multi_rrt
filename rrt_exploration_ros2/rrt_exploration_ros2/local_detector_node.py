@@ -18,7 +18,7 @@ class LocalRRTDetector(Node):
         self.declare_parameter('eta', 1.0)
         self.declare_parameter('robot_frame', 'base_link')
         self.declare_parameter('robot_name', 'robot1')
-        self.declare_parameter('update_frequency', 10.0)
+        self.declare_parameter('update_frequency', 30.0)
         
         # 獲取參數
         self.eta = self.get_parameter('eta').value
@@ -354,15 +354,43 @@ class LocalRRTDetector(Node):
         return cell_value == 0 or (50 <= cell_value <= 80)
 
     def check_path(self, start, end):
-        """檢查路徑狀態"""
+        """
+        檢查路徑狀態
+        返回:
+            -1: 找到frontier
+            0: 無效路徑
+            1: 有效路徑
+        """
         if not self.mapData:
             return 0
             
         resolution = self.mapData.info.resolution
-        steps = int(np.ceil(np.linalg.norm(np.array(end) - np.array(start)) / (resolution)))
+        origin_x = self.mapData.info.origin.position.x
+        origin_y = self.mapData.info.origin.position.y
+        width = self.mapData.info.width
         
-        has_unknown = False
-        unknown_count = 0
+        # 檢查終點周圍8個格子
+        end_x = int((end[0] - origin_x) / resolution)
+        end_y = int((end[1] - origin_y) / resolution)
+        
+        for dx in [-2, -1, 0, 1, 2]:
+            for dy in [-2, -1, 0, 1, 2]:
+                if dx == 0 and dy == 0:
+                    continue
+                    
+                check_x = end_x + dx
+                check_y = end_y + dy
+                
+                # 確保檢查點在地圖範圍內
+                if not (0 <= check_x < width and 0 <= check_y < self.mapData.info.height):
+                    continue
+                    
+                # 如果周圍有未知區域，就是frontier
+                if self.mapData.data[check_y * width + check_x] == -1:
+                    return -1
+    
+        # 檢查路徑是否可行
+        steps = int(np.ceil(np.linalg.norm(np.array(end) - np.array(start)) / resolution))
         obstacle_count = 0
         
         for i in range(steps + 1):
@@ -372,25 +400,19 @@ class LocalRRTDetector(Node):
                 start[1] + t * (end[1] - start[1])
             ]
             
-            x = int((point[0] - self.mapData.info.origin.position.x) / resolution)
-            y = int((point[1] - self.mapData.info.origin.position.y) / resolution)
+            x = int((point[0] - origin_x) / resolution)
+            y = int((point[1] - origin_y) / resolution)
             
-            if not (0 <= x < self.mapData.info.width and 0 <= y < self.mapData.info.height):
+            if not (0 <= x < width and 0 <= y < self.mapData.info.height):
                 return 0
                 
-            cell = self.mapData.data[y * self.mapData.info.width + x]
+            cell = self.mapData.data[y * width + x]
             
-            if cell > 0 and not (50 <= cell <= 80):  # 障礙物
+            if cell > 0 and not (50 <= cell <= 80):
                 obstacle_count += 1
-            elif cell == -1:  # 未知區域
-                unknown_count += 1
-                has_unknown = True
                 
-        # 如果障礙物太多或未知區域太少，返回0
-        if obstacle_count > steps * 0.1:  # 允許10%的障礙
+        if obstacle_count > steps * 0.1:
             return 0
-        if unknown_count > steps * 0.3:  # 至少30%是未知區域才算frontier
-            return -1
             
         return 1
 
@@ -407,13 +429,17 @@ class LocalRRTDetector(Node):
                 self.parents = {}
                 self.get_logger().info(f'Tree initialized at {robot_pos}')
             
-            # 增加多次嘗試的機會
+            # 在整個地圖範圍內隨機採樣
             for _ in range(10):
-                angle = np.random.uniform(0, 2 * np.pi)
-                r = np.random.uniform(0, 5.0)
                 x_rand = [
-                    robot_pos[0] + r * np.cos(angle),
-                    robot_pos[1] + r * np.sin(angle)
+                    np.random.uniform(
+                        self.mapData.info.origin.position.x,
+                        self.mapData.info.origin.position.x + self.mapData.info.width * self.mapData.info.resolution
+                    ),
+                    np.random.uniform(
+                        self.mapData.info.origin.position.y,
+                        self.mapData.info.origin.position.y + self.mapData.info.height * self.mapData.info.resolution
+                    )
                 ]
                 
                 if not self.is_valid_point(x_rand):
