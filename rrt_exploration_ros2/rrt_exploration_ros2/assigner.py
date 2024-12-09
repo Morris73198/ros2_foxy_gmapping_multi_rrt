@@ -30,7 +30,7 @@ class GreedyAssigner(Node):
         self.map_origin = None
         
         # 目標到達閾值
-        self.target_threshold = 0.3  # 機器人距離目標點小於此值視為到達
+        self.target_threshold = 0.5  # 機器人距離目標點小於此值視為到達
         
         # 訂閱和發布
         self.setup_subscribers()

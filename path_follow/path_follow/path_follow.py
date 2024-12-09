@@ -327,6 +327,13 @@ class PathFollower(Node):
         z = PID(0.4, 0.0, 0.0, 0)  # Angular PID
         x = PID(1, 0.01, 0.05, 0)   # Linear PID
         
+        # 根據路徑段動態調整閾值
+        def get_distance_threshold(current_index):
+            if current_index >= len(self.path) - 1:  # 最後一個點
+                return 0.5  # 終點使用更寬鬆的閾值
+            else:
+                return 0.3  # 中間點保持原閾值
+        
         while self.position[0] == 0 and self.position[1] == 0:
             time.sleep(0.1)
             
@@ -358,6 +365,9 @@ class PathFollower(Node):
                 self.position[1] - self.current_goal[1]
             )
             
+            # 使用動態閾值
+            current_threshold = get_distance_threshold(self.current_goal_index)
+            
             min_obstacle_distance = self.obstacle_distance_threshold
             if len(self.ranges) > 0:
                 min_obstacle_distance = min(self.obstacle_distance_threshold, min(self.ranges))
@@ -381,8 +391,8 @@ class PathFollower(Node):
                     z.PIDoutput(-2*math.pi - rotate)
                     twist.angular.z = max(-self.thetaTH, z.output)
             
-            # Check if reached current goal point
-            if distance_to_goal < 0.3:
+            # 檢查是否到達當前目標點，使用動態閾值
+            if distance_to_goal < current_threshold:
                 self.current_goal_index += 1
                 if self.current_goal_index < len(self.path):
                     self.current_goal = self.path[self.current_goal_index]
