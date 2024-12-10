@@ -9,12 +9,12 @@ class ExplorationBoundaryNode(Node):
     def __init__(self):
         super().__init__('exploration_boundary')
         
-        # 初始化变量
+        
         self.recorded_points = []
         self.frame_id = 'merge_map'
         self.boundary_completed = False
         
-        # 订阅者
+        
         self.point_sub = self.create_subscription(
             PointStamped,
             '/clicked_point',
@@ -22,7 +22,7 @@ class ExplorationBoundaryNode(Node):
             10
         )
         
-        # 发布者
+        
         self.boundary_pub = self.create_publisher(
             PolygonStamped,
             '/exploration_boundary',
@@ -47,7 +47,6 @@ class ExplorationBoundaryNode(Node):
         self.get_logger().info('Please click 4 points to define the exploration boundary')
 
     def create_circle_marker(self, point, index):
-        """创建圆圈标记"""
         marker = Marker()
         marker.header.frame_id = self.frame_id
         marker.header.stamp = self.get_clock().now().to_msg()
@@ -75,8 +74,7 @@ class ExplorationBoundaryNode(Node):
         return marker
 
     def point_callback(self, msg):
-        """处理点击点"""
-        if len(self.recorded_points) < 4:  # 只接收4个点
+        if len(self.recorded_points) < 4:  # 只接收4點
             point = Point32()
             point.x = float(msg.point.x)
             point.y = float(msg.point.y)
@@ -93,7 +91,7 @@ class ExplorationBoundaryNode(Node):
                 self.get_logger().info('Boundary completed. Global RRT detector will handle start point selection.')
 
     def publish_markers(self):
-        """发布所有标记"""
+        
         marker_array = MarkerArray()
         for i, point in enumerate(self.recorded_points):
             circle_marker = self.create_circle_marker(point, i)
@@ -101,7 +99,7 @@ class ExplorationBoundaryNode(Node):
         self.circles_pub.publish(marker_array)
 
     def publish_line(self):
-        """发布连接线标记"""
+        
         if len(self.recorded_points) >= 4:
             marker = Marker()
             marker.header.frame_id = self.frame_id
@@ -117,7 +115,7 @@ class ExplorationBoundaryNode(Node):
             marker.color.b = 0.0
             marker.color.a = 1.0
             
-            # 添加所有点
+            
             for point in self.recorded_points:
                 p = Point()
                 p.x = point.x
@@ -125,7 +123,7 @@ class ExplorationBoundaryNode(Node):
                 p.z = 0.0
                 marker.points.append(p)
             
-            # 闭合边界
+            
             if len(marker.points) > 0:
                 p = Point()
                 p.x = self.recorded_points[0].x
@@ -136,7 +134,7 @@ class ExplorationBoundaryNode(Node):
             self.line_marker_pub.publish(marker)
 
     def publish_boundary(self):
-        """发布边界多边形"""
+        
         if len(self.recorded_points) >= 4:
             msg = PolygonStamped()
             msg.header.stamp = self.get_clock().now().to_msg()
@@ -149,7 +147,7 @@ class ExplorationBoundaryNode(Node):
             self.boundary_pub.publish(msg)
 
     def timer_callback(self):
-        """定时发布更新"""
+        
         if len(self.recorded_points) > 0:
             self.publish_markers()
             

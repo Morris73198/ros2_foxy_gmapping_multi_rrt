@@ -20,7 +20,13 @@ class GreedyAssigner(Node):
         self.robot2_pose = None
         self.available_points = []
         self.assigned_targets = {'robot1': None, 'robot2': None}
-        self.robot_status = {'robot1': True, 'robot2': True}  # True means robot is available for new target
+        self.robot_status = {'robot1': True, 'robot2': True}  # True 表示機器人可以接收新目標
+        
+        # 機器人速度相關變量
+        self.robot_velocities = {'robot1': None, 'robot2': None}
+        self.velocity_check_threshold = 0.01  # 速度閾值，用於判斷機器人是否靜止
+        self.static_duration = {'robot1': 0.0, 'robot2': 0.0}  # 記錄機器人靜止的持續時間
+        self.static_threshold = 2.0  # 靜止超過此時間（秒）就重新分配目標
         
         # 地圖相關變量
         self.map_data = None
@@ -30,9 +36,9 @@ class GreedyAssigner(Node):
         self.map_origin = None
         
         # 目標到達閾值
-        self.target_threshold = 0.5  # 機器人距離目標點小於此值視為到達
+        self.target_threshold = 0.3  # 機器人距離目標點小於此值視為到達
         
-        # 訂閱和發布
+        # 設置訂閱者和發布者
         self.setup_subscribers()
         self.setup_publishers()
         
@@ -40,8 +46,9 @@ class GreedyAssigner(Node):
         self.create_timer(1.0, self.assign_targets)
         self.create_timer(0.1, self.publish_visualization)
         self.create_timer(0.1, self.check_target_reached)
+        self.create_timer(0.1, self.check_robot_motion)  # 檢查機器人運動狀態
         
-        self.get_logger().info('Greedy assigner node with A* pathfinding started')
+        self.get_logger().info('貪婪分配節點已啟動，包含 A* 路徑規劃')
 
     def setup_subscribers(self):
         """設置所有訂閱者"""
@@ -70,6 +77,21 @@ class GreedyAssigner(Node):
             MarkerArray,
             '/filtered_points',
             self.filtered_points_callback,
+            10
+        )
+        
+        # 訂閱各機器人的速度命令
+        self.robot1_cmd_vel_sub = self.create_subscription(
+            Twist,
+            '/robot1/cmd_vel',
+            lambda msg: self.cmd_vel_callback(msg, 'robot1'),
+            10
+        )
+        
+        self.robot2_cmd_vel_sub = self.create_subscription(
+            Twist,
+            '/robot2/cmd_vel',
+            lambda msg: self.cmd_vel_callback(msg, 'robot2'),
             10
         )
 
@@ -109,17 +131,17 @@ class GreedyAssigner(Node):
         self.map_width = msg.info.width
         self.map_height = msg.info.height
         self.map_origin = msg.info.origin
-        self.get_logger().debug('Received map update')
+        self.get_logger().debug('收到地圖更新')
 
     def robot1_pose_callback(self, msg):
-        """處理robot1的位置更新"""
+        """處理機器人1的位置更新"""
         self.robot1_pose = msg.pose
-        self.get_logger().debug('Received robot1 pose update')
+        self.get_logger().debug('收到機器人1位置更新')
 
     def robot2_pose_callback(self, msg):
-        """處理robot2的位置更新"""
+        """處理機器人2的位置更新"""
         self.robot2_pose = msg.pose
-        self.get_logger().debug('Received robot2 pose update')
+        self.get_logger().debug('收到機器人2位置更新')
 
     def filtered_points_callback(self, msg):
         """處理過濾後的點"""
@@ -127,7 +149,33 @@ class GreedyAssigner(Node):
         if msg.markers:
             for marker in msg.markers:
                 self.available_points.extend([(p.x, p.y) for p in marker.points])
-        self.get_logger().debug(f'Received {len(self.available_points)} filtered points')
+        self.get_logger().debug(f'收到 {len(self.available_points)} 個過濾後的點')
+
+    def cmd_vel_callback(self, msg: Twist, robot_name: str):
+        """處理速度命令消息，更新機器人速度狀態"""
+        # 計算線速度和角速度的總和
+        total_velocity = abs(msg.linear.x) + abs(msg.linear.y) + abs(msg.angular.z)
+        self.robot_velocities[robot_name] = total_velocity
+
+    def check_robot_motion(self):
+        """檢查機器人是否靜止"""
+        for robot_name in ['robot1', 'robot2']:
+            if self.robot_velocities[robot_name] is None:
+                continue
+                
+            # 檢查速度是否低於閾值
+            if self.robot_velocities[robot_name] < self.velocity_check_threshold:
+                self.static_duration[robot_name] += 0.1  # 增加靜止時間計數
+                
+                # 如果靜止時間超過閾值且沒有當前目標，強制設置為可用狀態
+                if (self.static_duration[robot_name] >= self.static_threshold and 
+                    not self.robot_status[robot_name]):
+                    self.get_logger().info(f'{robot_name} 已靜止 {self.static_threshold} 秒，標記為可用狀態')
+                    self.robot_status[robot_name] = True
+                    self.assigned_targets[robot_name] = None
+            else:
+                # 如果有運動，重置靜止時間計數
+                self.static_duration[robot_name] = 0.0
 
     def check_target_reached(self):
         """檢查機器人是否到達目標點"""
@@ -153,7 +201,7 @@ class GreedyAssigner(Node):
             # 如果距離小於閾值，認為已到達目標
             if distance < self.target_threshold:
                 if not self.robot_status[robot_name]:
-                    self.get_logger().info(f'{robot_name} has reached target {target_pos}')
+                    self.get_logger().info(f'{robot_name} 已到達目標點 {target_pos}')
                 self.robot_status[robot_name] = True
                 self.assigned_targets[robot_name] = None
             else:
@@ -198,7 +246,7 @@ class GreedyAssigner(Node):
         return np.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
 
     def a_star(self, start: Tuple[int, int], goal: Tuple[int, int]) -> bool:
-        """使用A*檢查目標點是否可達"""
+        """使用 A* 算法檢查目標點是否可達"""
         if not self.is_valid_point(*start) or not self.is_valid_point(*goal):
             return False
 
@@ -277,12 +325,13 @@ class GreedyAssigner(Node):
             self.robot2_pose is None or self.map_data is None:
             return
 
-        MIN_DISTANCE = 1.0
+        MIN_DISTANCE = 0.5  # 機器人與目標點的最小距離要求
         robots = {
             'robot1': self.robot1_pose,
             'robot2': self.robot2_pose
         }
 
+        # 記錄已分配的點
         assigned_points = set()
         for robot, target in self.assigned_targets.items():
             if target is not None:
@@ -296,6 +345,7 @@ class GreedyAssigner(Node):
             if not set(self.available_points) - assigned_points:
                 break
 
+            # 將機器人位置轉換為地圖坐標
             robot_map_pos = self.world_to_map(
                 robot_pose.position.x,
                 robot_pose.position.y
@@ -306,24 +356,31 @@ class GreedyAssigner(Node):
                 if tuple(point) in assigned_points:
                     continue
                     
+                # 計算機器人到目標點的直線距離
                 direct_dist = np.sqrt(
                     (point[0] - robot_pose.position.x)**2 + 
                     (point[1] - robot_pose.position.y)**2
                 )
                 
+                # 距離太近的點不考慮
                 if direct_dist < MIN_DISTANCE:
                     continue
 
+                # 將目標點轉換為地圖坐標
                 target_map_pos = self.world_to_map(point[0], point[1])
                 
+                # 使用 A* 檢查路徑可行性
                 if self.a_star(robot_map_pos, target_map_pos):
                     valid_targets.append((point, direct_dist))
 
+            # 如果找到有效的目標點
             if valid_targets:
+                # 選擇最近的點
                 closest_point = min(valid_targets, key=lambda x: x[1])[0]
                 assigned_points.add(tuple(closest_point))
                 self.assigned_targets[robot_name] = closest_point
 
+                # 創建並發布目標點消息
                 target_pose = PoseStamped()
                 target_pose.header.frame_id = 'merge_map'
                 target_pose.header.stamp = self.get_clock().now().to_msg()
@@ -331,19 +388,22 @@ class GreedyAssigner(Node):
                 target_pose.pose.position.y = closest_point[1]
                 target_pose.pose.orientation.w = 1.0
 
+                # 根據機器人選擇對應的發布者
                 if robot_name == 'robot1':
                     self.robot1_target_pub.publish(target_pose)
                 else:
                     self.robot2_target_pub.publish(target_pose)
 
+                # 發布調試信息
                 debug_msg = String()
-                debug_msg.data = f'Assigned target {closest_point} to {robot_name}'
+                debug_msg.data = f'已將目標點 {closest_point} 分配給 {robot_name}'
                 self.debug_pub.publish(debug_msg)
                 self.get_logger().info(debug_msg.data)
             else:
-                self.get_logger().warn(f'No valid path found for {robot_name}')
+                self.get_logger().warn(f'未找到 {robot_name} 的有效路徑')
 
 def main(args=None):
+    """主函數"""
     rclpy.init(args=args)
     try:
         node = GreedyAssigner()
@@ -351,7 +411,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        print(f'Error: {str(e)}')
+        print(f'錯誤: {str(e)}')
     finally:
         if 'node' in locals():
             node.destroy_node()
