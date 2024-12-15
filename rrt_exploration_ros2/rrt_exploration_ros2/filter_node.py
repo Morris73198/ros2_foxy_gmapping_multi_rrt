@@ -15,7 +15,7 @@ class FilterNode(Node):
         self.declare_parameter('map_topic', '/merge_map')
         self.declare_parameter('safety_threshold', 70)
         self.declare_parameter('info_radius', 0.5)
-        self.declare_parameter('safety_radius', 0.1)
+        self.declare_parameter('safety_radius', 0.05)
         self.declare_parameter('bandwith_cluster', 0.3)
         self.declare_parameter('rate', 2.0)  # 降低處理頻率
         self.declare_parameter('process_interval', 2.0)  # 處理間隔(秒)
@@ -34,6 +34,7 @@ class FilterNode(Node):
         self.frontiers = []  # 存儲所有前沿點
         self.frame_id = 'merge_map'
         self.last_process_time = self.get_clock().now()
+        self.assigned_points = set()  # 追蹤已分配的點
         
         # 訂閱者
         self.map_sub = self.create_subscription(
@@ -47,6 +48,14 @@ class FilterNode(Node):
             MarkerArray,
             '/found',
             self.markers_callback,
+            10
+        )
+        
+        # 添加訂閱已分配目標的話題
+        self.assigned_targets_sub = self.create_subscription(
+            MarkerArray,
+            '/assigned_targets_viz',
+            self.assigned_targets_callback,
             10
         )
         
@@ -100,6 +109,34 @@ class FilterNode(Node):
                 
         except Exception as e:
             self.get_logger().error(f'Error in markers_callback: {str(e)}')
+
+    def assigned_targets_callback(self, msg):
+        """處理已分配的目標點"""
+        try:
+            for marker in msg.markers:
+                # 將已分配的點添加到集合中
+                assigned_point = (
+                    marker.pose.position.x,
+                    marker.pose.position.y
+                )
+                self.assigned_points.add(assigned_point)
+                
+                # 從 frontiers 中移除已分配的點
+                self.frontiers = [
+                    point for point in self.frontiers 
+                    if not self.is_point_near_assigned(point, assigned_point)
+                ]
+                
+            self.get_logger().debug(f'Updated assigned points: {len(self.assigned_points)}')
+                    
+        except Exception as e:
+            self.get_logger().error(f'Error in assigned_targets_callback: {str(e)}')
+
+    def is_point_near_assigned(self, point, assigned_point, threshold=0.3):
+        """檢查點是否接近已分配的點"""
+        return np.linalg.norm(
+            np.array(point) - np.array(assigned_point)
+        ) < threshold
 
     def check_safety(self, point):
         """檢查點的安全性"""
@@ -169,6 +206,19 @@ class FilterNode(Node):
             
             # 記錄開始處理的點數
             initial_points = len(self.frontiers)
+            
+            # 移除已分配的點
+            filtered_frontiers = []
+            for point in self.frontiers:
+                is_assigned = False
+                for assigned_point in self.assigned_points:
+                    if self.is_point_near_assigned(point, assigned_point):
+                        is_assigned = True
+                        break
+                if not is_assigned:
+                    filtered_frontiers.append(point)
+                    
+            self.frontiers = filtered_frontiers
             
             # 發布原始前沿點
             raw_marker_array = MarkerArray()
@@ -254,12 +304,20 @@ class FilterNode(Node):
             filtered_centroids = []
             for point in centroids:
                 if self.check_safety(point) and self.calculate_info_gain(point) > 0.2:
-                    filtered_centroids.append(point)
-                    p = Point()
-                    p.x = float(point[0])
-                    p.y = float(point[1])
-                    p.z = 0.0
-                    filtered_marker.points.append(p)
+                    # 檢查是否接近已分配的點
+                    is_near_assigned = False
+                    for assigned_point in self.assigned_points:
+                        if self.is_point_near_assigned(point, assigned_point):
+                            is_near_assigned = True
+                            break
+                    
+                    if not is_near_assigned:
+                        filtered_centroids.append(point)
+                        p = Point()
+                        p.x = float(point[0])
+                        p.y = float(point[1])
+                        p.z = 0.0
+                        filtered_marker.points.append(p)
             
             filtered_marker_array.markers.append(filtered_marker)
             self.filtered_points_pub.publish(filtered_marker_array)
@@ -269,9 +327,6 @@ class FilterNode(Node):
                 f' {len(centroids)} clusters,'
                 f' {len(filtered_centroids)} filtered points'
             )
-            
-            # 保留未過濾的點以供下次處理
-            # self.frontiers = []  # 如果你想清除所有點，取消註釋此行
             
         except Exception as e:
             self.get_logger().error(f'Error in filter_points: {str(e)}')

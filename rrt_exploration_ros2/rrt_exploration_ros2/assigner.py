@@ -325,7 +325,7 @@ class GreedyAssigner(Node):
             self.robot2_pose is None or self.map_data is None:
             return
 
-        MIN_DISTANCE = 0.5  # 機器人與目標點的最小距離要求
+        MIN_DISTANCE = 1.0  # 機器人與目標點的最小距離要求
         robots = {
             'robot1': self.robot1_pose,
             'robot2': self.robot2_pose
