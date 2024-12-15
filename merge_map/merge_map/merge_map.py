@@ -152,7 +152,7 @@ class MergeMapNode(Node):
                 if pose_msg is None:
                     raise ValueError(f"No pose data available for {robot_name}")
                 
-                # 直接使用原始位置，不需要额外的转换
+                # 直接使用原始位置
                 pos = Point(
                     x=pose_msg.pose.position.x,
                     y=pose_msg.pose.position.y,

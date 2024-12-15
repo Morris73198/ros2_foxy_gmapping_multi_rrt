@@ -1,6 +1,3 @@
-# Authors: Abdulkadir Ture
-# Github : abdulkadrtr
-
 import os
 
 from ament_index_python.packages import get_package_share_directory
