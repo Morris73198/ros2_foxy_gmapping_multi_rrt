@@ -14,7 +14,7 @@ class FilterNode(Node):
         # 聲明參數
         self.declare_parameter('map_topic', '/merge_map')
         self.declare_parameter('safety_threshold', 70)
-        self.declare_parameter('info_radius', 0.5)
+        self.declare_parameter('info_radius', 0.1)
         self.declare_parameter('safety_radius', 0.05)
         self.declare_parameter('bandwith_cluster', 0.3)
         self.declare_parameter('rate', 2.0)  # 降低處理頻率

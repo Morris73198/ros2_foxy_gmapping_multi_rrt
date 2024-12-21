@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from visualization_msgs.msg import MarkerArray, Marker
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String, ColorRGBA
@@ -51,6 +51,12 @@ class DLAssigner(Node):
         self.assigned_targets = {'robot1': None, 'robot2': None}
         self.robot_status = {'robot1': True, 'robot2': True}
         
+        # 機器人速度相關變量
+        self.robot_velocities = {'robot1': None, 'robot2': None}
+        self.velocity_check_threshold = 0.01  # 速度閾值，用於判斷機器人是否靜止
+        self.static_duration = {'robot1': 0.0, 'robot2': 0.0}  # 記錄機器人靜止的持續時間
+        self.static_threshold = 2.0  # 靜止超過此時間（秒）就重新分配目標
+        
         # 地圖相關變量
         self.map_data = None
         self.map_resolution = None
@@ -90,6 +96,21 @@ class DLAssigner(Node):
             self.filtered_points_callback,
             10
         )
+        
+        # 訂閱各機器人的速度命令
+        self.robot1_cmd_vel_sub = self.create_subscription(
+            Twist,
+            '/robot1/cmd_vel',
+            lambda msg: self.cmd_vel_callback(msg, 'robot1'),
+            10
+        )
+        
+        self.robot2_cmd_vel_sub = self.create_subscription(
+            Twist,
+            '/robot2/cmd_vel',
+            lambda msg: self.cmd_vel_callback(msg, 'robot2'),
+            10
+        )
             
         # 設置發布者
         self.robot1_target_pub = self.create_publisher(
@@ -120,6 +141,7 @@ class DLAssigner(Node):
         self.create_timer(1.0, self.assign_targets)
         self.create_timer(0.1, self.publish_visualization)
         self.create_timer(0.1, self.check_target_reached)
+        self.create_timer(0.1, self.check_robot_motion)  # 檢查機器人運動狀態
         
         self.get_logger().info('深度學習frontier分配節點已啟動')
 
@@ -181,6 +203,34 @@ class DLAssigner(Node):
             for marker in msg.markers:
                 self.available_points.extend([(p.x, p.y) for p in marker.points])
         self.get_logger().debug(f'收到 {len(self.available_points)} 個frontier點')
+
+    def cmd_vel_callback(self, msg: Twist, robot_name: str):
+        """處理速度命令消息，更新機器人速度狀態"""
+        # 計算線速度和角速度的總和
+        total_velocity = abs(msg.linear.x) + abs(msg.linear.y) + abs(msg.angular.z)
+        self.robot_velocities[robot_name] = total_velocity
+
+    def check_robot_motion(self):
+        """檢查機器人是否靜止"""
+        for robot_name in ['robot1', 'robot2']:
+            if self.robot_velocities[robot_name] is None:
+                continue
+                
+            # 檢查速度是否低於閾值
+            if self.robot_velocities[robot_name] < self.velocity_check_threshold:
+                self.static_duration[robot_name] += 0.1  # 增加靜止時間計數
+                
+                # 如果靜止時間超過閾值且當前有目標，強制設置為可用狀態
+                if (self.static_duration[robot_name] >= self.static_threshold and 
+                    not self.robot_status[robot_name] and 
+                    self.assigned_targets[robot_name] is not None):
+                    self.get_logger().info(f'{robot_name} 已靜止 {self.static_threshold} 秒，強制重新分配目標')
+                    self.robot_status[robot_name] = True
+                    self.assigned_targets[robot_name] = None
+                    self.static_duration[robot_name] = 0.0  # 重置靜止時間
+            else:
+                # 如果有運動，重置靜止時間計數
+                self.static_duration[robot_name] = 0.0
 
     def predict_best_frontier(self, robot_name):
         """使用神經網路預測最佳frontier點"""
@@ -264,14 +314,12 @@ class DLAssigner(Node):
 
     def assign_targets(self):
         """分配目標給機器人"""
-        # 修改条件判断
         if (len(self.available_points) == 0 or 
-            self.processed_map is None or  # 使用 is None 而不是 not
+            self.processed_map is None or
             self.robot1_pose is None or 
             self.robot2_pose is None):
             return
 
-        # 剩余代码保持不变
         assigned_points = set()
         for target in self.assigned_targets.values():
             if target is not None:
