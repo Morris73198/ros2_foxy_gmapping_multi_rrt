@@ -12,8 +12,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'),
-         glob(os.path.join('launch', '*launch.[pxy][yma]*'))),
+        ('share/' + package_name + '/saved_models',
+            glob('rrt_exploration_ros2/saved_models/*.h5')),  # 添加模型文件
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,6 +29,7 @@ setup(
             'local_detector_node = rrt_exploration_ros2.local_detector_node:main',
             'filter_node = rrt_exploration_ros2.filter_node:main',
             'assigner = rrt_exploration_ros2.assigner:main',
+            'test_assigner = rrt_exploration_ros2.test_assigner:main',
         ],
     },
 )
