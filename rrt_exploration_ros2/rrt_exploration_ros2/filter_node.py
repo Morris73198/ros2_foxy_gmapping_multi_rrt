@@ -14,11 +14,11 @@ class FilterNode(Node):
         # 聲明參數
         self.declare_parameter('map_topic', '/merge_map')
         self.declare_parameter('safety_threshold', 70)
-        self.declare_parameter('info_radius', 0.1)
-        self.declare_parameter('safety_radius', 0.05)
+        self.declare_parameter('info_radius', 0.5)
+        self.declare_parameter('safety_radius', 0.005)
         self.declare_parameter('bandwith_cluster', 0.3)
         self.declare_parameter('rate', 2.0)  # 降低處理頻率
-        self.declare_parameter('process_interval', 2.0)  # 處理間隔(秒)
+        self.declare_parameter('process_interval', 1.0)  # 處理間隔(秒)
         
         # 獲取參數值
         self.map_topic = self.get_parameter('map_topic').value
@@ -132,7 +132,7 @@ class FilterNode(Node):
         except Exception as e:
             self.get_logger().error(f'Error in assigned_targets_callback: {str(e)}')
 
-    def is_point_near_assigned(self, point, assigned_point, threshold=0.3):
+    def is_point_near_assigned(self, point, assigned_point, threshold=0.5):
         """檢查點是否接近已分配的點"""
         return np.linalg.norm(
             np.array(point) - np.array(assigned_point)
@@ -189,6 +189,154 @@ class FilterNode(Node):
                             info_gain += 1
                             
         return info_gain * (resolution ** 2)
+    
+    
+    
+    
+    
+    def check_safety(self, point):
+        """
+        檢查點的安全性和可達性
+        1. 確保點本身在安全距離內沒有障礙物
+        2. 確保有一條全部經過已知自由空間的路徑可以到達未知區域
+        
+        Args:
+            point: 要檢查的點 [x, y]
+        Returns:
+            bool: 如果點安全且可達則返回True，否則返回False
+        """
+        if not self.mapData:
+            return False
+            
+        resolution = self.mapData.info.resolution
+        x = int((point[0] - self.mapData.info.origin.position.x) / resolution)
+        y = int((point[1] - self.mapData.info.origin.position.y) / resolution)
+        width = self.mapData.info.width
+        
+        # 1. 基本邊界檢查
+        if not (0 <= x < width and 0 <= y < self.mapData.info.height):
+            return False
+            
+        # 2. 檢查點本身必須在已知的自由空間
+        if self.mapData.data[y * width + x] != 0:  # 0表示自由空間
+            return False
+        
+        # 3. 檢查安全距離內是否有障礙物
+        safety_cells = int(self.safety_radius / resolution)
+        for dx in range(-safety_cells, safety_cells + 1):
+            for dy in range(-safety_cells, safety_cells + 1):
+                check_x = x + dx
+                check_y = y + dy
+                
+                if not (0 <= check_x < width and 0 <= check_y < self.mapData.info.height):
+                    continue
+                    
+                cell_value = self.mapData.data[check_y * width + check_x]
+                if cell_value > 50:  # 如果是障礙物
+                    return False
+        
+        # 4. 檢查是否有一條全部經過已知自由空間的路徑可以到達未知區域
+        found_valid_path = False
+        for angle in np.linspace(0, 2*np.pi, 16):  # 檢查16個方向
+            path_length = int(self.safety_radius * 1.5 / resolution)  # 稍微延長檢查距離
+            path_valid = True
+            reached_unknown = False
+            
+            # 沿著這個方向檢查每個點
+            for dist in range(1, path_length + 1):
+                check_x = int(x + dist * np.cos(angle))
+                check_y = int(y + dist * np.sin(angle))
+                
+                # 檢查邊界
+                if not (0 <= check_x < width and 0 <= check_y < self.mapData.info.height):
+                    path_valid = False
+                    break
+                    
+                cell_value = self.mapData.data[check_y * width + check_x]
+                
+                # 如果遇到未知區域，標記找到了未知區域並停止搜索
+                if cell_value == -1:
+                    reached_unknown = True
+                    break
+                    
+                # 如果遇到障礙物或未知區域，這條路徑無效
+                if cell_value != 0:  # 不是自由空間
+                    path_valid = False
+                    break
+            
+            # 如果這條路徑有效且到達了未知區域
+            if path_valid and reached_unknown:
+                found_valid_path = True
+                break
+        
+        return found_valid_path
+
+    def check_path_to_point(self, start_point, end_point):
+        """
+        檢查從起點到終點的路徑是否安全（只經過已知的自由空間）
+        
+        Args:
+            start_point: 起點 [x, y]
+            end_point: 終點 [x, y]
+        Returns:
+            bool: 如果路徑安全則返回True，否則返回False
+        """
+        if not self.mapData:
+            return False
+            
+        resolution = self.mapData.info.resolution
+        
+        # 轉換為地圖坐標
+        start_x = int((start_point[0] - self.mapData.info.origin.position.x) / resolution)
+        start_y = int((start_point[1] - self.mapData.info.origin.position.y) / resolution)
+        end_x = int((end_point[0] - self.mapData.info.origin.position.x) / resolution)
+        end_y = int((end_point[1] - self.mapData.info.origin.position.y) / resolution)
+        
+        # 使用Bresenham算法檢查路徑上的每個點
+        dx = abs(end_x - start_x)
+        dy = abs(end_y - start_y)
+        x = start_x
+        y = start_y
+        
+        n = 1 + dx + dy
+        x_inc = 1 if end_x > start_x else -1
+        y_inc = 1 if end_y > start_y else -1
+        error = dx - dy
+        dx *= 2
+        dy *= 2
+        
+        for _ in range(n):
+            # 檢查當前點是否在地圖範圍內
+            if not (0 <= x < self.mapData.info.width and 0 <= y < self.mapData.info.height):
+                return False
+                
+            # 檢查當前點是否是已知的自由空間
+            cell_value = self.mapData.data[y * self.mapData.info.width + x]
+            if cell_value != 0:  # 不是自由空間
+                return False
+            
+            if error > 0:
+                x += x_inc
+                error -= dy
+            else:
+                y += y_inc
+                error += dx
+                
+        return True
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 
     def filter_points(self):
         """過濾和聚類前沿點"""
@@ -199,7 +347,7 @@ class FilterNode(Node):
 
         if len(self.frontiers) < 1 or not self.mapData:
             return
-            
+                
         try:
             # 更新處理時間戳
             self.last_process_time = current_time
@@ -207,7 +355,7 @@ class FilterNode(Node):
             # 記錄開始處理的點數
             initial_points = len(self.frontiers)
             
-            # 移除已分配的點
+            # 1. 首先移除已分配的點
             filtered_frontiers = []
             for point in self.frontiers:
                 is_assigned = False
@@ -217,10 +365,10 @@ class FilterNode(Node):
                         break
                 if not is_assigned:
                     filtered_frontiers.append(point)
-                    
+                        
             self.frontiers = filtered_frontiers
             
-            # 發布原始前沿點
+            # 2. 發布原始前沿點（用於可視化）
             raw_marker_array = MarkerArray()
             raw_marker = Marker()
             raw_marker.header.frame_id = self.frame_id
@@ -247,15 +395,25 @@ class FilterNode(Node):
             raw_marker_array.markers.append(raw_marker)
             self.raw_points_pub.publish(raw_marker_array)
 
-            # 執行聚類
-            points_array = np.array(self.frontiers)
+            # 3. 安全性檢查 - 在聚類之前先進行初步篩選
+            safe_frontiers = []
+            for point in self.frontiers:
+                if self.check_safety([point[0], point[1]]):
+                    safe_frontiers.append(point)
+                    
+            if not safe_frontiers:
+                self.get_logger().info('No safe frontiers found')
+                return
+
+            # 4. 執行聚類
+            points_array = np.array(safe_frontiers)
             ms = MeanShift(bandwidth=self.bandwith)
             ms.fit(points_array)
             centroids = ms.cluster_centers_
             
             self.get_logger().info(f'Clustering {len(points_array)} points into {len(centroids)} centroids')
             
-            # 發布聚類中心
+            # 5. 發布聚類中心（用於可視化）
             cluster_marker_array = MarkerArray()
             cluster_marker = Marker()
             cluster_marker.header.frame_id = self.frame_id
@@ -283,7 +441,7 @@ class FilterNode(Node):
             cluster_marker_array.markers.append(cluster_marker)
             self.cluster_centers_pub.publish(cluster_marker_array)
 
-            # 過濾和發布最終結果
+            # 6. 對聚類中心進行最終的安全性和信息增益檢查
             filtered_marker_array = MarkerArray()
             filtered_marker = Marker()
             filtered_marker.header.frame_id = self.frame_id
@@ -299,11 +457,13 @@ class FilterNode(Node):
             filtered_marker.color.r = 1.0
             filtered_marker.color.g = 1.0
             filtered_marker.color.b = 0.0
-            filtered_marker.color.a = 0.878787
+            filtered_marker.color.a = 0.8
 
             filtered_centroids = []
             for point in centroids:
-                if self.check_safety(point) and self.calculate_info_gain(point) > 0.2:
+                # 確保聚類中心也是安全的並且有足夠的信息增益
+                if (self.check_safety(point) and 
+                    self.calculate_info_gain(point) > 0.2):
                     # 檢查是否接近已分配的點
                     is_near_assigned = False
                     for assigned_point in self.assigned_points:

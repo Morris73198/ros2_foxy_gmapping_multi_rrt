@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# CNN + DQN one robot
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Twist
@@ -250,7 +252,7 @@ class DLAssigner(Node):
         return self.available_points[best_idx]
 
     def check_target_reached(self):
-        """檢查機器人是否到達目標點"""
+        """检查機器人是否到達目標點"""
         for robot_name, robot_pose in [('robot1', self.robot1_pose), ('robot2', self.robot2_pose)]:
             if not robot_pose or not self.assigned_targets[robot_name]:
                 continue
@@ -262,11 +264,15 @@ class DLAssigner(Node):
                 (current_pos[1] - target_pos[1])**2
             )
 
+            # 如果距離小於值閥值，認為已經達到目標
             if distance < self.target_threshold:
                 if not self.robot_status[robot_name]:
                     self.get_logger().info(f'{robot_name} 已到達目標點 {target_pos}')
                 self.robot_status[robot_name] = True
                 self.assigned_targets[robot_name] = None
+                
+                # 重新分配
+                self.assign_targets()
             else:
                 self.robot_status[robot_name] = False
 
@@ -320,35 +326,83 @@ class DLAssigner(Node):
             self.robot2_pose is None):
             return
 
+        # 獲取已分配的點
         assigned_points = set()
-        for target in self.assigned_targets.values():
-            if target is not None:
-                assigned_points.add(tuple(target))
-
         for robot_name in ['robot1', 'robot2']:
+            if self.assigned_targets[robot_name] is not None:
+                assigned_points.add(tuple(self.assigned_targets[robot_name]))
+
+        # 移除与已分配的點太近的點
+        available_points = []
+        for point in self.available_points:
+            too_close = False
+            for assigned_point in assigned_points:
+                dist = np.sqrt(
+                    (point[0] - assigned_point[0])**2 + 
+                    (point[1] - assigned_point[1])**2
+                )
+                if dist < 0.5:  
+                    too_close = True
+                    break
+            if not too_close:
+                available_points.append(point)
+
+        if not available_points:
+            return
+
+        # 對每一台機器人進行目標分配
+        for robot_name in ['robot1', 'robot2']:
+            
             if not self.robot_status[robot_name] or self.assigned_targets[robot_name] is not None:
                 continue
 
-            best_frontier = self.predict_best_frontier(robot_name)
-            
-            if best_frontier and tuple(best_frontier) not in assigned_points:
-                self.assigned_targets[robot_name] = best_frontier
-                assigned_points.add(tuple(best_frontier))
+            # 對剩餘的點進行評估
+            valid_points = []
+            for point in available_points:
+                if tuple(point) in assigned_points:
+                    continue
 
+                # 计算距離
+                robot_pose = self.robot1_pose if robot_name == 'robot1' else self.robot2_pose
+                dist = np.sqrt(
+                    (point[0] - robot_pose.position.x)**2 + 
+                    (point[1] - robot_pose.position.y)**2
+                )
+                
+                # 如果距離太近就跳過
+                if dist < 1.0:  
+                    continue
+
+                # 使用訓練的模型
+                state = np.expand_dims(self.processed_map, 0)
+                frontiers = np.expand_dims(self.pad_frontiers(available_points), 0)
+                robot_pos = np.expand_dims(self.get_normalized_position(robot_pose), 0)
+                q_values = self.model.predict(state, frontiers, robot_pos)[0]
+                valid_points.append((point, q_values[available_points.index(point)]))
+
+            if valid_points:
+                # Q值最高的點
+                best_point = max(valid_points, key=lambda x: x[1])[0]
+                self.assigned_targets[robot_name] = best_point
+                assigned_points.add(tuple(best_point))
+
+                # 發布目標點
                 target_pose = PoseStamped()
                 target_pose.header.frame_id = 'merge_map'
                 target_pose.header.stamp = self.get_clock().now().to_msg()
-                target_pose.pose.position.x = best_frontier[0]
-                target_pose.pose.position.y = best_frontier[1]
+                target_pose.pose.position.x = best_point[0]
+                target_pose.pose.position.y = best_point[1]
                 target_pose.pose.orientation.w = 1.0
 
+                # 根據機器人選擇發布給誰
                 if robot_name == 'robot1':
                     self.robot1_target_pub.publish(target_pose)
                 else:
                     self.robot2_target_pub.publish(target_pose)
 
+            
                 debug_msg = String()
-                debug_msg.data = f'已將frontier點 {best_frontier} 分配給 {robot_name}'
+                debug_msg.data = f'已將frontier點 {best_point} 分配给 {robot_name}'
                 self.debug_pub.publish(debug_msg)
                 self.get_logger().info(debug_msg.data)
 
