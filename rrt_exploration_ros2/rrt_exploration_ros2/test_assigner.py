@@ -24,11 +24,11 @@ class DLAssigner(Node):
             max_frontiers=50
         )
         
-        # 获取包的安装路径
+        # 獲取package的安装路径
         import ament_index_python
         package_path = ament_index_python.get_package_share_directory('rrt_exploration_ros2')
         
-        # 构建模型文件的完整路径
+        # 建構模型文件的完整路徑
         default_model_path = os.path.join(package_path, 'saved_models', 'frontier_model_ep000740.h5')
         model_path = self.declare_parameter('model_path', default_model_path).value
         
@@ -332,7 +332,7 @@ class DLAssigner(Node):
             if self.assigned_targets[robot_name] is not None:
                 assigned_points.add(tuple(self.assigned_targets[robot_name]))
 
-        # 移除与已分配的點太近的點
+        # 移除與已分配的點太近的點
         available_points = []
         for point in self.available_points:
             too_close = False
@@ -362,7 +362,7 @@ class DLAssigner(Node):
                 if tuple(point) in assigned_points:
                     continue
 
-                # 计算距離
+                # 計算距離
                 robot_pose = self.robot1_pose if robot_name == 'robot1' else self.robot2_pose
                 dist = np.sqrt(
                     (point[0] - robot_pose.position.x)**2 + 
