@@ -59,10 +59,16 @@ class SocketAssigner(Node):
         self.robot_static_time = {'robot1': 0.0, 'robot2': 0.0}
         self.robot_last_move_time = {'robot1': self.get_clock().now(), 'robot2': self.get_clock().now()}
         
+        # 新增：目標點保護機制
+        self.target_assignment_time = {'robot1': None, 'robot2': None}  # 目標分配時間
+        self.target_protection_enabled = {'robot1': False, 'robot2': False}  # 目標保護狀態（初始為False）
+        
         # 參數設定
-        self.static_threshold = 5.0  # 靜止超過5秒重新分配
-        self.movement_threshold = 0.1  # 移動距離閾值
-        self.target_threshold = 0.5  # 到達目標距離閾值
+        self.static_threshold = 8.0  # 靜止超過8秒重新分配（增加時間避免頻繁切換）
+        self.movement_threshold = 0.15  # 移動距離閾值（稍微增加避免誤判）
+        self.target_threshold = 0.8  # 到達目標距離閾值（增加避免過早判定到達）
+        self.exclusion_radius = 2.0  # 機器人A選擇點附近的排除半徑（新增）
+        self.min_target_distance = 1.5  # 兩個機器人目標點的最小距離（新增）
         
         # 地圖相關
         self.map_data = None
@@ -78,12 +84,12 @@ class SocketAssigner(Node):
         self.setup_publishers()
 
         # 定時器
-        self.create_timer(2.0, self.assign_targets)  # 每2秒檢查分配
+        self.create_timer(3.0, self.assign_targets)  # 降低檢查頻率到每3秒
         self.create_timer(0.5, self.check_robot_status)  # 每0.5秒檢查機器人狀態
         self.create_timer(0.1, self.publish_visualization)
-        self.create_timer(1.0, self.publish_debug_info)
+        self.create_timer(2.0, self.publish_debug_info)  # 降低debug頻率
 
-        self.get_logger().info('Smart Socket Assigner started - 監控機器人運動狀態')
+        self.get_logger().info('Improved Socket Assigner started - 目標保護機制啟用')
 
     def setup_subscribers(self):
         self.map_sub = self.create_subscription(
@@ -181,8 +187,10 @@ class SocketAssigner(Node):
                 )
                 
                 if distance_to_target < self.target_threshold:
-                    self.get_logger().info(f'{robot_name} 已到達目標點，清除目標')
+                    self.get_logger().info(f'{robot_name} 已到達目標點，清除目標並允許重新分配')
                     self.assigned_targets[robot_name] = None
+                    self.target_assignment_time[robot_name] = None
+                    self.target_protection_enabled[robot_name] = False  # 允許重新分配
                     self.robot_static_time[robot_name] = 0.0
                     self.robot_last_move_time[robot_name] = current_time
                     continue
@@ -200,9 +208,10 @@ class SocketAssigner(Node):
                 )
                 
                 if movement_distance > self.movement_threshold:
-                    # 機器人有移動，重置靜止時間
+                    # 機器人有移動，重置靜止時間，但保持目標保護
                     self.robot_static_time[robot_name] = 0.0
                     self.robot_last_move_time[robot_name] = current_time
+                    # 不改變 target_protection_enabled 狀態
                 else:
                     # 機器人沒有移動，累積靜止時間
                     time_diff = (current_time - self.robot_last_move_time[robot_name]).nanoseconds / 1e9
@@ -211,18 +220,60 @@ class SocketAssigner(Node):
                     # 如果靜止太久且有目標，清除目標重新分配
                     if (self.robot_static_time[robot_name] > self.static_threshold and 
                         self.assigned_targets[robot_name] is not None):
-                        self.get_logger().info(
-                            f'{robot_name} 靜止 {self.robot_static_time[robot_name]:.1f}秒，清除目標重新分配'
+                        self.get_logger().warning(
+                            f'{robot_name} 靜止 {self.robot_static_time[robot_name]:.1f}秒，強制清除目標並允許重新分配'
                         )
                         self.assigned_targets[robot_name] = None
+                        self.target_assignment_time[robot_name] = None
+                        self.target_protection_enabled[robot_name] = False  # 允許重新分配
                         self.robot_static_time[robot_name] = 0.0
                         self.robot_last_move_time[robot_name] = current_time
             
             # 更新上次位置
             self.robot_last_pose[robot_name] = current_pose
 
+    def is_point_too_close_to_other_target(self, point, robot_name):
+        """檢查點是否太接近其他機器人的目標點"""
+        other_robot = 'robot2' if robot_name == 'robot1' else 'robot1'
+        other_target = self.assigned_targets[other_robot]
+        
+        if other_target is None:
+            return False
+            
+        distance = np.sqrt(
+            (point[0] - other_target[0])**2 + 
+            (point[1] - other_target[1])**2
+        )
+        
+        return distance < self.min_target_distance
+
+    def filter_excluded_points(self, points, robot_name):
+        """過濾掉被其他機器人排除的點"""
+        other_robot = 'robot2' if robot_name == 'robot1' else 'robot1'
+        other_target = self.assigned_targets[other_robot]
+        
+        if other_target is None:
+            return points
+        
+        filtered_points = []
+        for point in points:
+            distance_to_other_target = np.sqrt(
+                (point[0] - other_target[0])**2 + 
+                (point[1] - other_target[1])**2
+            )
+            
+            # 如果點不在其他機器人目標的排除半徑內，則保留
+            if distance_to_other_target >= self.exclusion_radius:
+                filtered_points.append(point)
+            else:
+                self.get_logger().debug(
+                    f'排除點 {point} - 距離 {other_robot} 目標太近 ({distance_to_other_target:.2f}m < {self.exclusion_radius}m)'
+                )
+        
+        return filtered_points
+
     def assign_targets(self):
-        """智能分配目標 - 確保不分配相同點"""
+        """智能分配目標 - 加強目標保護機制"""
         # 檢查前置條件
         if not self.available_points:
             self.get_logger().debug('沒有可用的frontier點')
@@ -236,123 +287,105 @@ class SocketAssigner(Node):
             self.get_logger().debug('地圖資料未處理完成')
             return
 
-        # 檢查哪些機器人需要新目標
+        # 檢查哪些機器人需要新目標（嚴格的目標保護）
         need_assignment = []
+        current_time = self.get_clock().now()
+        
         for robot_name in ['robot1', 'robot2']:
+            # 要求1：到目標點前不准換目標點（除非機器人不移動一段時間）
+            if self.assigned_targets[robot_name] is not None and self.target_protection_enabled[robot_name]:
+                # 如果有目標且保護啟用，不重新分配
+                self.get_logger().debug(f'{robot_name} 有受保護目標，跳過重新分配')
+                continue
+            
+            # 沒有目標或目標保護已關閉的機器人需要分配
             if self.assigned_targets[robot_name] is None:
                 need_assignment.append(robot_name)
+                self.get_logger().debug(f'{robot_name} 沒有目標，加入分配列表')
         
         if not need_assignment:
+            self.get_logger().debug('所有機器人都有受保護的目標或不需要重新分配')
             return
 
         self.get_logger().info(f'需要分配目標: {need_assignment}, 可用frontier: {len(self.available_points)}')
 
-        # 如果可用frontier數量少於需要分配的機器人數量
-        if len(self.available_points) < len(need_assignment):
-            self.get_logger().warn(f'frontier數量({len(self.available_points)})少於需要分配的機器人數量({len(need_assignment)})')
-            # 按距離排序，優先分配給較近的機器人
-            need_assignment = self.sort_robots_by_distance_to_frontiers(need_assignment)
-
-        # 組成狀態字典
-        state = {
-            "map": self.processed_map.tolist(),
-            "frontiers": self.available_points,
-            "robot1_pose": [self.robot1_pose.position.x, self.robot1_pose.position.y],
-            "robot2_pose": [self.robot2_pose.position.x, self.robot2_pose.position.y]
-        }
-
-        try:
-            self.get_logger().info('向RL服務器請求目標分配...')
-            target_result = send_state_and_get_target(state)
-            
-            if "error" in target_result:
-                self.get_logger().error(f'RL服務器錯誤: {target_result["error"]}')
-                return
-            
-            # 智能分配目標，確保不重複
-            self.smart_assign_targets(target_result, need_assignment)
-                
-        except Exception as e:
-            self.get_logger().error(f'分配目標時發生錯誤: {e}')
-
-    def smart_assign_targets(self, target_result, need_assignment):
-        """智能分配目標，確保不重複"""
-        assigned_points = set()
-        
-        # 檢查回傳格式
-        if "robot1_target" in target_result and "robot2_target" in target_result:
-            # 多機器人格式
-            potential_targets = {
-                "robot1": target_result["robot1_target"],
-                "robot2": target_result["robot2_target"]
-            }
-        else:
-            # 單目標格式，需要分別請求
-            potential_targets = {}
-            for robot_name in need_assignment:
-                single_state = {
-                    "map": self.processed_map.tolist(),
-                    "frontiers": self.available_points,
-                    "robot1_pose": [self.robot1_pose.position.x, self.robot1_pose.position.y],
-                    "robot2_pose": [self.robot2_pose.position.x, self.robot2_pose.position.y],
-                    "request_robot": robot_name
-                }
-                single_result = send_state_and_get_target(single_state)
-                potential_targets[robot_name] = single_result.get('target_point')
-
-        # 智能分配邏輯：避免衝突
-        final_assignments = {}
-        
-        # 第一輪：分配不衝突的目標
+        # 為每個需要分配的機器人處理
         for robot_name in need_assignment:
-            if robot_name in potential_targets:
-                target = potential_targets[robot_name]
-                if target and tuple(target) not in assigned_points:
-                    final_assignments[robot_name] = target
-                    assigned_points.add(tuple(target))
-
-        # 第二輪：為沒有分配到目標的機器人找替代目標
-        unassigned_robots = [r for r in need_assignment if r not in final_assignments]
-        available_frontiers = [p for p in self.available_points if tuple(p) not in assigned_points]
-        
-        for i, robot_name in enumerate(unassigned_robots):
-            if i < len(available_frontiers):
-                alternative_target = available_frontiers[i]
-                final_assignments[robot_name] = alternative_target
-                assigned_points.add(tuple(alternative_target))
-                self.get_logger().info(f'為 {robot_name} 分配替代目標: {alternative_target}')
-
-        # 發布分配結果
-        for robot_name, target in final_assignments.items():
-            self.publish_target_to_robot(robot_name, target)
-
-    def sort_robots_by_distance_to_frontiers(self, robot_list):
-        """按機器人到frontier的平均距離排序"""
-        robot_distances = []
-        
-        for robot_name in robot_list:
-            robot_pose = getattr(self, f'{robot_name}_pose')
-            robot_pos = [robot_pose.position.x, robot_pose.position.y]
+            # 要求2：機器人A選擇的點附近的候選點機器人B不准選
+            filtered_points = self.filter_excluded_points(self.available_points, robot_name)
             
-            # 計算到所有frontier的平均距離
-            distances = []
-            for frontier in self.available_points:
+            if not filtered_points:
+                self.get_logger().warning(f'{robot_name} 沒有可用的frontier點（都被其他機器人排除）')
+                continue
+
+            # 組成狀態字典（使用過濾後的點）
+            state = {
+                "map": self.processed_map.tolist(),
+                "frontiers": filtered_points,
+                "robot1_pose": [self.robot1_pose.position.x, self.robot1_pose.position.y],
+                "robot2_pose": [self.robot2_pose.position.x, self.robot2_pose.position.y],
+                "request_robot": robot_name
+            }
+
+            try:
+                self.get_logger().info(f'向RL服務器為 {robot_name} 請求目標分配...')
+                target_result = send_state_and_get_target(state)
+                
+                if "error" in target_result:
+                    self.get_logger().error(f'RL服務器錯誤: {target_result["error"]}')
+                    continue
+                
+                # 獲取目標點
+                target_point = target_result.get('target_point')
+                if target_point is None:
+                    self.get_logger().warning(f'RL服務器未返回 {robot_name} 的目標點')
+                    continue
+                
+                # 要求3：兩台機器人不能選相同點
+                if self.is_point_too_close_to_other_target(target_point, robot_name):
+                    self.get_logger().warning(f'{robot_name} 的目標點太接近其他機器人目標，尋找替代點')
+                    # 尋找替代目標
+                    alternative_target = self.find_alternative_target(filtered_points, robot_name)
+                    if alternative_target:
+                        target_point = alternative_target
+                        self.get_logger().info(f'為 {robot_name} 找到替代目標: {alternative_target}')
+                    else:
+                        self.get_logger().warning(f'無法為 {robot_name} 找到合適的替代目標')
+                        continue
+                
+                # 分配目標
+                self.publish_target_to_robot(robot_name, target_point)
+                
+            except Exception as e:
+                self.get_logger().error(f'為 {robot_name} 分配目標時發生錯誤: {e}')
+
+    def find_alternative_target(self, available_points, robot_name):
+        """為機器人尋找替代目標點"""
+        robot_pose = getattr(self, f'{robot_name}_pose')
+        robot_pos = [robot_pose.position.x, robot_pose.position.y]
+        
+        # 按距離排序可用點
+        distances = []
+        for point in available_points:
+            if not self.is_point_too_close_to_other_target(point, robot_name):
                 dist = np.sqrt(
-                    (robot_pos[0] - frontier[0])**2 + 
-                    (robot_pos[1] - frontier[1])**2
+                    (robot_pos[0] - point[0])**2 + 
+                    (robot_pos[1] - point[1])**2
                 )
-                distances.append(dist)
-            
-            avg_distance = np.mean(distances) if distances else float('inf')
-            robot_distances.append((robot_name, avg_distance))
+                distances.append((point, dist))
         
-        # 按距離排序（距離近的優先）
-        robot_distances.sort(key=lambda x: x[1])
-        return [robot_name for robot_name, _ in robot_distances]
+        if not distances:
+            return None
+        
+        # 返回最近的有效點
+        distances.sort(key=lambda x: x[1])
+        return distances[0][0]
 
     def publish_target_to_robot(self, robot_name, target):
-        """發布目標點給機器人"""
+        """發布目標點給機器人並啟用保護"""
         self.assigned_targets[robot_name] = target
+        self.target_assignment_time[robot_name] = self.get_clock().now()
+        self.target_protection_enabled[robot_name] = True  # 啟用目標保護
         
         # 創建目標訊息
         target_pose = PoseStamped()
@@ -370,7 +403,7 @@ class SocketAssigner(Node):
 
         # 發布除錯訊息
         debug_msg = String()
-        debug_msg.data = f'分配目標: {robot_name} -> {target}'
+        debug_msg.data = f'分配受保護目標: {robot_name} -> {target}'
         self.debug_pub.publish(debug_msg)
         self.get_logger().info(debug_msg.data)
 
@@ -385,10 +418,12 @@ class SocketAssigner(Node):
             "available_points": len(self.available_points),
             "robot1_target": self.assigned_targets['robot1'],
             "robot2_target": self.assigned_targets['robot2'],
+            "robot1_protected": self.target_protection_enabled['robot1'],
+            "robot2_protected": self.target_protection_enabled['robot2'],
             "robot1_static_time": f"{self.robot_static_time['robot1']:.1f}s",
             "robot2_static_time": f"{self.robot_static_time['robot2']:.1f}s"
         }
-        debug_msg.data = f"智能分配器狀態: {json.dumps(debug_info, ensure_ascii=False)}"
+        debug_msg.data = f"改進分配器狀態: {json.dumps(debug_info, ensure_ascii=False)}"
         self.debug_pub.publish(debug_msg)
 
     def create_target_marker(self, point, robot_name, marker_id):
@@ -403,12 +438,23 @@ class SocketAssigner(Node):
         marker.pose.position.y = point[1]
         marker.pose.position.z = 0.0
         marker.pose.orientation.w = 1.0
-        marker.scale.x = marker.scale.y = marker.scale.z = 0.5
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.6  # 稍微大一點以顯示保護狀態
+        
+        # 根據保護狀態改變顏色
+        robot_index = 1 if robot_name == 'robot1' else 2
+        is_protected = self.target_protection_enabled[robot_name]
         
         if robot_name == 'robot1':
-            marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)
+            if is_protected:
+                marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)  # 亮紅色表示保護
+            else:
+                marker.color = ColorRGBA(r=0.8, g=0.4, b=0.4, a=0.8)  # 暗紅色表示未保護
         else:
-            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.8)
+            if is_protected:
+                marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)  # 亮綠色表示保護
+            else:
+                marker.color = ColorRGBA(r=0.4, g=0.8, b=0.4, a=0.8)  # 暗綠色表示未保護
+                
         return marker
 
     def publish_visualization(self):

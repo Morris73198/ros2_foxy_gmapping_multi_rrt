@@ -16,18 +16,15 @@ class GridFrontierDetector(Node):
         # 參數聲明
         self.declare_parameter('map_topic', '/merge_map')
         self.declare_parameter('detection_frequency', 2.0)
-        self.declare_parameter('min_frontier_size', 3)  # 降低最小聚類大小
-        self.declare_parameter('frontier_detection_radius', 2)  # 檢測半徑(暫時不用)
-        self.declare_parameter('safety_margin', 1)  # 安全邊距(暫時不用)
-        self.declare_parameter('min_distance_threshold', 0.4)  # 最小距離閾值
+        # 移除不需要的參數
+        # self.declare_parameter('min_frontier_size', 3)
+        # self.declare_parameter('frontier_detection_radius', 2)
+        # self.declare_parameter('safety_margin', 1)
+        # self.declare_parameter('min_distance_threshold', 0.4)
         
         # 獲取參數值
         self.map_topic = self.get_parameter('map_topic').value
         self.detection_frequency = self.get_parameter('detection_frequency').value
-        self.min_frontier_size = self.get_parameter('min_frontier_size').value
-        self.frontier_detection_radius = self.get_parameter('frontier_detection_radius').value
-        self.safety_margin = self.get_parameter('safety_margin').value
-        self.min_distance_threshold = self.get_parameter('min_distance_threshold').value
         
         # 初始化變量
         self.mapData = None
@@ -76,7 +73,7 @@ class GridFrontierDetector(Node):
         # 創建定時器
         self.create_timer(1.0 / self.detection_frequency, self.detect_frontiers)
         
-        self.get_logger().info('Grid Frontier Detector initialized')
+        self.get_logger().info('Grid Frontier Detector initialized - OUTPUT ALL FRONTIERS')
         self.get_logger().info('Waiting for map and boundary...')
 
     def init_markers(self):
@@ -136,7 +133,7 @@ class GridFrontierDetector(Node):
             self.boundary = msg.polygon.points
             self.boundary_received = True
             self.get_logger().info('Received exploration boundary')
-            self.get_logger().info('Starting grid-based frontier detection...')
+            self.get_logger().info('Starting grid-based frontier detection - NO FILTERING...')
 
     def is_point_in_boundary(self, point):
         """檢查點是否在探索邊界內"""
@@ -184,22 +181,6 @@ class GridFrontierDetector(Node):
         
         return False
 
-    def is_safe_frontier(self, x, y, map_data, width, height):
-        """檢查frontier點是否安全 - 減少安全檢查範圍但保持基本安全"""
-        # 檢查當前點周圍小範圍是否安全
-        for dx in range(-1, 2):  # 只檢查3x3範圍
-            for dy in range(-1, 2):
-                nx = x + dx
-                ny = y + dy
-                
-                if 0 <= nx < width and 0 <= ny < height:
-                    cell_value = map_data[ny * width + nx]
-                    # 如果有確定的障礙物(>90)則不安全
-                    if cell_value > 90:
-                        return False
-        
-        return True
-
     def grid_to_world(self, x, y):
         """將網格座標轉換為世界座標"""
         if not self.mapData:
@@ -210,39 +191,8 @@ class GridFrontierDetector(Node):
         
         return [world_x, world_y]
 
-    def cluster_frontiers(self, frontier_cells):
-        """對frontier點進行聚類"""
-        if len(frontier_cells) == 0:
-            return []
-        
-        # 使用OpenCV進行連通組件分析
-        frontier_image = np.zeros((self.mapData.info.height, self.mapData.info.width), dtype=np.uint8)
-        
-        for x, y in frontier_cells:
-            frontier_image[y, x] = 255
-        
-        # 找到連通組件
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(frontier_image, connectivity=8)
-        
-        frontier_clusters = []
-        
-        for i in range(1, num_labels):  # 跳過背景標籤(0)
-            area = stats[i, cv2.CC_STAT_AREA]
-            
-            # 只保留足夠大的聚類
-            if area >= self.min_frontier_size:
-                centroid_x = int(centroids[i][0])
-                centroid_y = int(centroids[i][1])
-                
-                # 轉換為世界座標
-                world_point = self.grid_to_world(centroid_x, centroid_y)
-                if world_point:
-                    frontier_clusters.append(world_point)
-        
-        return frontier_clusters
-
     def detect_frontiers(self):
-        """執行網格搜尋frontier檢測"""
+        """執行網格搜尋frontier檢測 - 輸出所有找到的frontier"""
         if not self.mapData:
             self.get_logger().debug('No map data available')
             return
@@ -256,7 +206,7 @@ class GridFrontierDetector(Node):
             width = self.mapData.info.width
             height = self.mapData.info.height
             
-            frontier_cells = []
+            frontier_points = []
             free_cells = 0
             unknown_cells = 0
             obstacle_cells = 0
@@ -273,11 +223,11 @@ class GridFrontierDetector(Node):
                     elif cell_value > 50:
                         obstacle_cells += 1
                     
+                    # 檢查是否為frontier點
                     if self.is_frontier_cell(x, y, map_data, width, height):
-                        if self.is_safe_frontier(x, y, map_data, width, height):
-                            world_point = self.grid_to_world(x, y)
-                            if world_point and self.is_point_in_boundary(world_point):
-                                frontier_cells.append((x, y))
+                        world_point = self.grid_to_world(x, y)
+                        if world_point and self.is_point_in_boundary(world_point):
+                            frontier_points.append(world_point)
             
             # 每10次檢測輸出一次統計信息
             if hasattr(self, 'detection_count'):
@@ -288,43 +238,41 @@ class GridFrontierDetector(Node):
             if self.detection_count % 10 == 0:
                 total_cells = width * height
                 self.get_logger().info(f'Map stats - Free: {free_cells}, Unknown: {unknown_cells}, Obstacles: {obstacle_cells}, Total: {total_cells}')
-                self.get_logger().info(f'Found {len(frontier_cells)} frontier cells before clustering')
+                self.get_logger().info(f'Found {len(frontier_points)} frontier points (NO FILTERING)')
             
-            # 對frontier點進行聚類
-            frontier_clusters = self.cluster_frontiers(frontier_cells)
-            
-            # 過濾重複的frontier點
+            # 直接發布所有找到的frontier點，不進行過濾或聚類
             new_frontiers = []
-            MIN_DISTANCE = self.min_distance_threshold
-            
-            for new_frontier in frontier_clusters:
+            for frontier in frontier_points:
+                # 可以選擇是否要去除重複點（保留最基本的重複檢查）
                 is_new = True
+                MIN_DISTANCE = 0.1  # 非常小的距離閾值，只去除完全重複的點
+                
                 for existing_frontier in self.frontiers:
                     distance = np.sqrt(
-                        (new_frontier[0] - existing_frontier[0])**2 + 
-                        (new_frontier[1] - existing_frontier[1])**2
+                        (frontier[0] - existing_frontier[0])**2 + 
+                        (frontier[1] - existing_frontier[1])**2
                     )
                     if distance < MIN_DISTANCE:
                         is_new = False
                         break
                 
                 if is_new:
-                    new_frontiers.append(new_frontier)
+                    new_frontiers.append(frontier)
             
             # 發布新的frontier點
             for frontier in new_frontiers:
                 self.publish_frontier(frontier)
             
-            # 更新frontier列表(保留最近的50個)
+            # 更新frontier列表(保留最近的200個)
             self.frontiers.extend(new_frontiers)
-            if len(self.frontiers) > 50:
-                self.frontiers = self.frontiers[-50:]
+            if len(self.frontiers) > 200:  # 增加保留數量
+                self.frontiers = self.frontiers[-200:]
             
             # 更新可視化
             self.update_visualization()
             
             if new_frontiers:
-                self.get_logger().info(f'Detected {len(new_frontiers)} new frontiers, total: {len(self.frontiers)}')
+                self.get_logger().info(f'Detected {len(new_frontiers)} new frontiers, total: {len(self.frontiers)} (ALL OUTPUT)')
         
         except Exception as e:
             self.get_logger().error(f'Error in frontier detection: {str(e)}')
@@ -342,7 +290,8 @@ class GridFrontierDetector(Node):
         self.frontier_pub.publish(msg)
         
         self.frontier_count += 1
-        self.get_logger().info(f'Found frontier {self.frontier_count}: ({point[0]:.2f}, {point[1]:.2f})')
+        if self.frontier_count % 10 == 0:  # 減少日誌輸出頻率
+            self.get_logger().info(f'Published frontier {self.frontier_count}: ({point[0]:.2f}, {point[1]:.2f})')
 
     def update_visualization(self):
         """更新可視化標記"""
