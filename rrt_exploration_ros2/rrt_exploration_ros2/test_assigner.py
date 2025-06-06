@@ -59,16 +59,16 @@ class SocketAssigner(Node):
         self.robot_static_time = {'robot1': 0.0, 'robot2': 0.0}
         self.robot_last_move_time = {'robot1': self.get_clock().now(), 'robot2': self.get_clock().now()}
         
-        # 新增：目標點保護機制
+        # 核心：目標鎖定機制 - 一旦分配就絕對鎖定
+        self.target_locked = {'robot1': False, 'robot2': False}  # 目標鎖定狀態
         self.target_assignment_time = {'robot1': None, 'robot2': None}  # 目標分配時間
-        self.target_protection_enabled = {'robot1': False, 'robot2': False}  # 目標保護狀態（初始為False）
         
         # 參數設定
-        self.static_threshold = 8.0  # 靜止超過8秒重新分配（增加時間避免頻繁切換）
-        self.movement_threshold = 0.15  # 移動距離閾值（稍微增加避免誤判）
-        self.target_threshold = 0.8  # 到達目標距離閾值（增加避免過早判定到達）
-        self.exclusion_radius = 2.0  # 機器人A選擇點附近的排除半徑（新增）
-        self.min_target_distance = 1.5  # 兩個機器人目標點的最小距離（新增）
+        self.static_threshold = 10.0  # 靜止超過10秒才強制重置（增加時間）
+        self.movement_threshold = 0.2  # 移動距離閾值
+        self.target_threshold = 0.8  # 到達目標距離閾值
+        self.exclusion_radius = 2.0  # 機器人A選擇點附近的排除半徑
+        self.min_target_distance = 1.5  # 兩個機器人目標點的最小距離
         
         # 地圖相關
         self.map_data = None
@@ -83,13 +83,14 @@ class SocketAssigner(Node):
         self.setup_subscribers()
         self.setup_publishers()
 
-        # 定時器
-        self.create_timer(3.0, self.assign_targets)  # 降低檢查頻率到每3秒
-        self.create_timer(0.5, self.check_robot_status)  # 每0.5秒檢查機器人狀態
-        self.create_timer(0.1, self.publish_visualization)
-        self.create_timer(2.0, self.publish_debug_info)  # 降低debug頻率
+        # 定時器 - 降低所有檢查頻率
+        self.create_timer(8.0, self.assign_targets)  # 每8秒才檢查一次分配
+        self.create_timer(1.0, self.check_robot_status)  # 每1秒檢查機器人狀態
+        self.create_timer(0.2, self.publish_visualization)  # 降低可視化頻率
+        self.create_timer(5.0, self.publish_debug_info)  # 降低debug頻率
 
-        self.get_logger().info('Improved Socket Assigner started - 目標保護機制啟用')
+        self.get_logger().warning('🔒 ABSOLUTE Target Lock Assigner started - 絕對目標鎖定模式')
+        self.get_logger().warning('⚠️  一旦分配目標，絕對不會切換直到到達或卡住')
 
     def setup_subscribers(self):
         self.map_sub = self.create_subscription(
@@ -179,7 +180,7 @@ class SocketAssigner(Node):
             current_pos = [current_pose.position.x, current_pose.position.y]
             
             # 檢查1：是否到達目標
-            if self.assigned_targets[robot_name] is not None:
+            if self.assigned_targets[robot_name] is not None and self.target_locked[robot_name]:
                 target_pos = self.assigned_targets[robot_name]
                 distance_to_target = np.sqrt(
                     (current_pos[0] - target_pos[0])**2 + 
@@ -187,10 +188,11 @@ class SocketAssigner(Node):
                 )
                 
                 if distance_to_target < self.target_threshold:
-                    self.get_logger().info(f'{robot_name} 已到達目標點，清除目標並允許重新分配')
+                    self.get_logger().warning(f'🎯 {robot_name} 已到達目標點，解除鎖定並允許重新分配')
+                    # 完全清除目標和鎖定
                     self.assigned_targets[robot_name] = None
+                    self.target_locked[robot_name] = False
                     self.target_assignment_time[robot_name] = None
-                    self.target_protection_enabled[robot_name] = False  # 允許重新分配
                     self.robot_static_time[robot_name] = 0.0
                     self.robot_last_move_time[robot_name] = current_time
                     continue
@@ -208,24 +210,26 @@ class SocketAssigner(Node):
                 )
                 
                 if movement_distance > self.movement_threshold:
-                    # 機器人有移動，重置靜止時間，但保持目標保護
+                    # 機器人有移動，重置靜止時間，但保持目標鎖定
                     self.robot_static_time[robot_name] = 0.0
                     self.robot_last_move_time[robot_name] = current_time
-                    # 不改變 target_protection_enabled 狀態
+                    # 絕對不改變 target_locked 狀態
                 else:
                     # 機器人沒有移動，累積靜止時間
                     time_diff = (current_time - self.robot_last_move_time[robot_name]).nanoseconds / 1e9
                     self.robot_static_time[robot_name] = time_diff
                     
-                    # 如果靜止太久且有目標，清除目標重新分配
+                    # 只有靜止太久才強制解除鎖定
                     if (self.robot_static_time[robot_name] > self.static_threshold and 
-                        self.assigned_targets[robot_name] is not None):
-                        self.get_logger().warning(
-                            f'{robot_name} 靜止 {self.robot_static_time[robot_name]:.1f}秒，強制清除目標並允許重新分配'
+                        self.assigned_targets[robot_name] is not None and 
+                        self.target_locked[robot_name]):
+                        self.get_logger().error(
+                            f'🚨 {robot_name} 靜止 {self.robot_static_time[robot_name]:.1f}秒，強制解除鎖定並允許重新分配'
                         )
+                        # 完全清除目標和鎖定
                         self.assigned_targets[robot_name] = None
+                        self.target_locked[robot_name] = False
                         self.target_assignment_time[robot_name] = None
-                        self.target_protection_enabled[robot_name] = False  # 允許重新分配
                         self.robot_static_time[robot_name] = 0.0
                         self.robot_last_move_time[robot_name] = current_time
             
@@ -273,7 +277,7 @@ class SocketAssigner(Node):
         return filtered_points
 
     def assign_targets(self):
-        """智能分配目標 - 加強目標保護機制"""
+        """智能分配目標 - 絕對鎖定機制"""
         # 檢查前置條件
         if not self.available_points:
             self.get_logger().debug('沒有可用的frontier點')
@@ -287,24 +291,28 @@ class SocketAssigner(Node):
             self.get_logger().debug('地圖資料未處理完成')
             return
 
-        # 檢查哪些機器人需要新目標（嚴格的目標保護）
+        # 檢查哪些機器人需要新目標（絕對鎖定檢查）
         need_assignment = []
         current_time = self.get_clock().now()
         
         for robot_name in ['robot1', 'robot2']:
-            # 要求1：到目標點前不准換目標點（除非機器人不移動一段時間）
-            if self.assigned_targets[robot_name] is not None and self.target_protection_enabled[robot_name]:
-                # 如果有目標且保護啟用，不重新分配
-                self.get_logger().debug(f'{robot_name} 有受保護目標，跳過重新分配')
+            # 🔒 絕對鎖定邏輯：如果目標已鎖定，絕對不重新分配
+            if self.target_locked[robot_name]:
+                target = self.assigned_targets[robot_name]
+                self.get_logger().debug(f'🔒 {robot_name} 目標已鎖定 {target}，絕對不重新分配')
                 continue
             
-            # 沒有目標或目標保護已關閉的機器人需要分配
-            if self.assigned_targets[robot_name] is None:
+            # 只有沒有目標或目標未鎖定的機器人才需要分配
+            if self.assigned_targets[robot_name] is None and not self.target_locked[robot_name]:
                 need_assignment.append(robot_name)
-                self.get_logger().debug(f'{robot_name} 沒有目標，加入分配列表')
-        
+                self.get_logger().info(f'✅ {robot_name} 沒有鎖定目標，可以分配')
+
         if not need_assignment:
-            self.get_logger().debug('所有機器人都有受保護的目標或不需要重新分配')
+            # 輸出當前狀態以便調試
+            for robot_name in ['robot1', 'robot2']:
+                target = self.assigned_targets[robot_name]
+                locked = self.target_locked[robot_name]
+                self.get_logger().debug(f'{robot_name}: target={target}, locked={locked}')
             return
 
         self.get_logger().info(f'需要分配目標: {need_assignment}, 可用frontier: {len(self.available_points)}')
@@ -353,7 +361,7 @@ class SocketAssigner(Node):
                         self.get_logger().warning(f'無法為 {robot_name} 找到合適的替代目標')
                         continue
                 
-                # 分配目標
+                # 分配目標並立即啟用絕對鎖定
                 self.publish_target_to_robot(robot_name, target_point)
                 
             except Exception as e:
@@ -382,10 +390,15 @@ class SocketAssigner(Node):
         return distances[0][0]
 
     def publish_target_to_robot(self, robot_name, target):
-        """發布目標點給機器人並啟用保護"""
+        """發布目標點給機器人並立即啟用絕對鎖定"""
+        # 🔒 立即鎖定目標 - 這是關鍵！
         self.assigned_targets[robot_name] = target
+        self.target_locked[robot_name] = True  # 立即絕對鎖定
         self.target_assignment_time[robot_name] = self.get_clock().now()
-        self.target_protection_enabled[robot_name] = True  # 啟用目標保護
+        
+        # 重置運動狀態，避免誤判靜止
+        self.robot_static_time[robot_name] = 0.0
+        self.robot_last_move_time[robot_name] = self.get_clock().now()
         
         # 創建目標訊息
         target_pose = PoseStamped()
@@ -403,9 +416,9 @@ class SocketAssigner(Node):
 
         # 發布除錯訊息
         debug_msg = String()
-        debug_msg.data = f'分配受保護目標: {robot_name} -> {target}'
+        debug_msg.data = f'🔒 絕對鎖定目標: {robot_name} -> {target} (已鎖定，絕不切換)'
         self.debug_pub.publish(debug_msg)
-        self.get_logger().info(debug_msg.data)
+        self.get_logger().error(debug_msg.data)  # 使用error級別確保可見
 
     def publish_debug_info(self):
         """發布詳細除錯資訊"""
@@ -418,12 +431,12 @@ class SocketAssigner(Node):
             "available_points": len(self.available_points),
             "robot1_target": self.assigned_targets['robot1'],
             "robot2_target": self.assigned_targets['robot2'],
-            "robot1_protected": self.target_protection_enabled['robot1'],
-            "robot2_protected": self.target_protection_enabled['robot2'],
+            "robot1_locked": self.target_locked['robot1'],
+            "robot2_locked": self.target_locked['robot2'],
             "robot1_static_time": f"{self.robot_static_time['robot1']:.1f}s",
             "robot2_static_time": f"{self.robot_static_time['robot2']:.1f}s"
         }
-        debug_msg.data = f"改進分配器狀態: {json.dumps(debug_info, ensure_ascii=False)}"
+        debug_msg.data = f"絕對鎖定分配器狀態: {json.dumps(debug_info, ensure_ascii=False)}"
         self.debug_pub.publish(debug_msg)
 
     def create_target_marker(self, point, robot_name, marker_id):
@@ -438,22 +451,22 @@ class SocketAssigner(Node):
         marker.pose.position.y = point[1]
         marker.pose.position.z = 0.0
         marker.pose.orientation.w = 1.0
-        marker.scale.x = marker.scale.y = marker.scale.z = 0.6  # 稍微大一點以顯示保護狀態
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.6  # 稍微大一點以顯示鎖定狀態
         
-        # 根據保護狀態改變顏色
+        # 根據鎖定狀態改變顏色
         robot_index = 1 if robot_name == 'robot1' else 2
-        is_protected = self.target_protection_enabled[robot_name]
+        is_locked = self.target_locked[robot_name]
         
         if robot_name == 'robot1':
-            if is_protected:
-                marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)  # 亮紅色表示保護
+            if is_locked:
+                marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)  # 亮紅色表示鎖定
             else:
-                marker.color = ColorRGBA(r=0.8, g=0.4, b=0.4, a=0.8)  # 暗紅色表示未保護
+                marker.color = ColorRGBA(r=0.8, g=0.4, b=0.4, a=0.8)  # 暗紅色表示未鎖定
         else:
-            if is_protected:
-                marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)  # 亮綠色表示保護
+            if is_locked:
+                marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)  # 亮綠色表示鎖定
             else:
-                marker.color = ColorRGBA(r=0.4, g=0.8, b=0.4, a=0.8)  # 暗綠色表示未保護
+                marker.color = ColorRGBA(r=0.4, g=0.8, b=0.4, a=0.8)  # 暗綠色表示未鎖定
                 
         return marker
 
